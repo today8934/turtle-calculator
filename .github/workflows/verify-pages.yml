@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: [.github/workflows/verify-pages.yml]
+    paths: [index.html, .github/workflows/verify-pages.yml, .github/tests/portfolio.mjs]
   workflow_run:
     workflows: ["pages build and deployment"]
     types: [completed]
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   verify:
@@ -17,26 +18,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - name: Install browser test client
         run: npm install --no-save --package-lock=false --ignore-scripts playwright-core@1.56.1
-      - name: Open the published page and calculate the example
+      - name: Verify portfolio persistence and calculations in Chrome
         env:
-          SITE_URL: https://today8934.github.io/turtle-calculator/
+          LIVE_URL: https://today8934.github.io/turtle-calculator/
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          node --input-type=module <<'JS'
-          import assert from 'node:assert/strict';
-          import { chromium } from 'playwright-core';
-
-          const browser = await chromium.launch({ channel: 'chrome' });
-          try {
-            const page = await browser.newPage();
-            const response = await page.goto(process.env.SITE_URL);
-            assert.equal(response.status(), 200);
-            assert.equal(await page.title(), '터틀 포지션 계산기');
-            await page.getByRole('button', { name: '예시 불러오기' }).click();
-            await page.waitForFunction(() => document.querySelector('#stop').textContent === '205,000원');
-            console.log('Public page returned HTTP 200 and calculated the expected example stop price.');
-          } finally {
-            await browser.close();
-          }
-          JS
+          if [ "$EVENT_NAME" = push ]; then
+            python3 -m http.server 8787 --bind 127.0.0.1 >/tmp/turtle-http.log 2>&1 &
+            trap 'kill "$!" 2>/dev/null || true' EXIT
+            SITE_URL=http://127.0.0.1:8787/
+            curl --retry 8 --retry-connrefused --retry-delay 1 --silent --fail "$SITE_URL" -o /dev/null
+          else
+            SITE_URL="${LIVE_URL}?check=${RUN_ID}"
+          fi
+          export SITE_URL
+          node .github/tests/portfolio.mjs
