@@ -37,3 +37,14 @@ jobs:
           fi
           export SITE_URL
           node .github/tests/portfolio.mjs
+      - name: Exercise the live page when it matches this revision
+        if: github.event_name == 'push'
+        env:
+          SITE_URL: https://today8934.github.io/turtle-calculator/?check=${{ github.run_id }}
+        run: |
+          curl --fail --silent --show-error --retry 3 "$SITE_URL" -o /tmp/turtle-published.html
+          if cmp -s index.html /tmp/turtle-published.html; then
+            node .github/tests/portfolio.mjs
+          else
+            echo "Production still serves a different revision."
+          fi
