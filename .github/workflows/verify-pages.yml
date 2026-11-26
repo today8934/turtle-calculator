@@ -1,0 +1,42 @@
+name: Verify published calculator
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/verify-pages.yml]
+  workflow_run:
+    workflows: ["pages build and deployment"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  verify:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Install browser test client
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright-core@1.56.1
+      - name: Open the published page and calculate the example
+        env:
+          SITE_URL: https://today8934.github.io/turtle-calculator/
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { chromium } from 'playwright-core';
+
+          const browser = await chromium.launch({ channel: 'chrome' });
+          try {
+            const page = await browser.newPage();
+            const response = await page.goto(process.env.SITE_URL);
+            assert.equal(response.status(), 200);
+            assert.equal(await page.title(), '터틀 포지션 계산기');
+            await page.getByRole('button', { name: '예시 불러오기' }).click();
+            await page.waitForFunction(() => document.querySelector('#stop').textContent === '205,000원');
+            console.log('Public page returned HTTP 200 and calculated the expected example stop price.');
+          } finally {
+            await browser.close();
+          }
+          JS
