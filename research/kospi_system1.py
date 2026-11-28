@@ -361,6 +361,57 @@ def main():
         if tag == "low_first":
             compare_entries()
     pd.DataFrame(results).to_csv(OUT / "summary.csv", index=False)
+    explain_price_order(index, m, order)
+
+
+def explain_price_order(index, m, order):
+    logs, curves, pnl = {}, {}, {}
+    for path in ["low_first", "high_first"]:
+        stem = f"rolling_{path}"
+        logs[path] = pd.read_csv(OUT/f"{stem}_fills.csv", dtype={"code":str})
+        curves[path] = pd.read_csv(OUT/f"{stem}_daily.csv").set_index("date")
+        pnl[path] = pd.read_csv(OUT/f"{stem}_stock_profit.csv", dtype={"code":str}).set_index("code").profit_krw
+    gap = curves["high_first"].equity - curves["low_first"].equity
+    def emit(tag, record):
+        print(tag, json.dumps(record, ensure_ascii=False, default=str), flush=True)
+    first = gap.index[gap.abs()>1][0]
+    emit("FIRST_EQUITY_DATE", first)
+    first_trades = set()
+    for path,log in logs.items():
+        sample = log.loc[log.date <= first, ["date","name","action","raw_price","raw_shares","reason","cash_after"]]
+        emit("FIRST_EQUITY_"+path, sample.tail(12).round(2).to_dict("records"))
+        for _,row in log.loc[log.date == first].iterrows():
+            first_trades.add(row.code)
+        emit("FIRST_MARK_"+path, curves[path].loc[first].to_dict())
+    i = index.index.get_loc(pd.Timestamp(first))
+    for code in sorted(first_trades):
+        k = order.index(code)
+        emit("OHLC_"+code, {field:round(float(m[field][i,k]/m["factor"][i,k]),2) for field in ["o","h","l","c","n","u20","d10","u55"]})
+    # An explicit same-day buy/stop instance where the two paths treated the same security differently.
+    for path, log in logs.items():
+        other = logs["high_first" if path=="low_first" else "low_first"]
+        count = 0
+        for (date,code), rows in log.groupby(["date","code"],sort=True):
+            if not (rows.reason.eq("entry").any() and rows.action.eq("sell").any()):
+                continue
+            comp = other.loc[(other.date==date)&(other.code==code)]
+            if not comp.reason.eq("entry").any() or comp.action.eq("sell").any():
+                continue
+            emit("ENTRY_STOP_"+path, [date,code,rows[["name","reason","raw_price","raw_shares"]].round(2).values.tolist(),comp[["reason","raw_price","raw_shares"]].round(2).values.tolist()])
+            count += 1
+            if count==2:
+                break
+    p = pd.DataFrame(pnl).fillna(0)
+    names = pd.concat(logs.values()).drop_duplicates("code").set_index("code").name
+    p["delta"] = p.high_first-p.low_first
+    p["name"] = p.index.map(names)
+    assert abs(p.delta.sum()-gap.iloc[-1])<1
+    emit("PROFIT_DIFFERENCE", pd.concat([p.nlargest(6,"delta"),p.nsmallest(3,"delta")]).round(0).to_dict("records"))
+    for code in p.nlargest(2,"delta").index:
+        for path, log in logs.items():
+            emit("TOP_TRADES_"+path, log.loc[log.code==code,["date","name","reason","raw_price","raw_shares"]].round(2).values.tolist())
+    entries = [set(zip(t.date,t.code)) for log in logs.values() for t in [log.loc[log.reason=="entry"]]]
+    emit("ENTRY_OVERLAP_PATHS", [len(x) for x in entries]+[len(entries[0]&entries[1])])
 
 
 def compare_entries():
