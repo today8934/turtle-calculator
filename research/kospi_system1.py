@@ -3,6 +3,7 @@ import json
 import math
 import re
 from urllib.request import urlopen, Request
+from urllib.parse import urlencode
 from pathlib import Path
 
 import numpy as np
@@ -222,7 +223,7 @@ def room(k, pos, corr):
 
 
 def simulate(index, m, last, order, names, priority, eligible, phases, events, label, correlations,
-             buy_fee=.0005, sell_fee=.0025, retry=False):
+             buy_fee=.0005, sell_fee=.0025, retry=False, align_dec19=None):
     initial = CAPITAL
     cash = equity = float(initial)
     annual_base = notional = float(initial)
@@ -269,6 +270,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                 stage, fac = -1, 1.
                 record(k, "sell", 0, pos[k]["qty"], "delisting_zero_recovery")
                 del pos[k]
+        align_today = align_dec19 is not None and history[i]==pd.Timestamp("2025-12-19")
         for stage, field in enumerate(phases):
             signal = np.flatnonzero(np.isfinite(events[i, stage]) & eligible_today)
             active = sorted(set(pos).union(signal), key=lambda k: (priority[i,k], order[k]))
@@ -318,6 +320,8 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                 if hold is None or not rising:
                     continue
                 while hold["units"] < 4:
+                    if align_today and order[k] == "005930":
+                        break
                     level = executable(hold["latest"] + .5*hold["n"], fac, True)
                     if target < level or not room(k, pos, correlations[i]):
                         break
@@ -329,6 +333,16 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                             waiting.setdefault(k, (hold, desired, hold["n"], sales))
                         break
                     buy_lot(k, px, shares / fac, hold["n"], hold)
+        if align_today:
+            k = order.index("005930")
+            fac = m["factor"][i,k]
+            held = pos[k]
+            assert abs(held["qty"]*fac-265)<1e-6 and room(k,pos,correlations[i])
+            assert 265*align_dec19*(1+buy_fee) < cash
+            stage = 4
+            buy_lot(k,align_dec19*fac,265/fac,held["n"],held)
+            print("ALIGN_DEC19",label,"price",align_dec19,"cash",cash,"holdings",
+                  [(order[k], round(v["qty"]*m["factor"][i,k],2)) for k,v in pos.items()],flush=True)
         if retry:
             # A fixed, independently observable execution time, with no use of a fabricated quote at the sale timestamp.
             stage = 4
@@ -378,7 +392,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
 
 
 def main():
-    check_december_prices()
+    observed = check_december_prices()
     index, data_, order, names, ranks, final = data()
     m, last, adj = panels(index, data_, order)
     ref = index.loc[START:]
@@ -395,15 +409,40 @@ def main():
                                     f"{name}_{tag}",correlations))
         results.append(simulate(index,m,last,order,names,priority,rolling,path,events,
                                 f"retry_{tag}",correlations,retry=True))
+        results.append(simulate(index,m,last,order,names,priority,rolling,path,events,
+                                f"aligned_{tag}",correlations,align_dec19=observed))
         if tag == "low_first":
             compare_entries()
     pd.DataFrame(results).to_csv(OUT / "summary.csv", index=False)
     explain_price_order(index, m, order)
+    for tag in ["low_first","high_first","near_first"]:
+        p = pd.read_csv(OUT/f"retry_{tag}_stock_profit.csv", dtype={"code":str}).set_index("code")
+        print("RETRY_SAMSUNG_ELECTRO",tag,p.profit_krw.get("009150",0.),flush=True)
 
 
 def check_december_prices():
     day = pd.Timestamp("2025-12-19",tz="Asia/Seoul")
+    minute = {}
     for code in ["005930", "005380"]:
+        try:
+            params = {"count":400,"session":"regular","investMode":"krx","useAdjustedRate":"false",
+                      "to":"2025-12-19T15:31:00+09:00"}
+            url = f"https://wts-info-api.tossinvest.com/api/v1/c-chart/kr-s/A{code}/min:1?"+urlencode(params)
+            with urlopen(Request(url, headers={"User-Agent":"Mozilla/5.0"}),timeout=8) as response:
+                obj = json.load(response)
+            candles = obj.get("result",obj).get("candles",[])
+            if candles:
+                print("MINUTE_SAMPLE",code,candles[0],candles[-1],flush=True)
+                c = pd.DataFrame(candles)
+                stamp = next(k for k in ["dt","dateTime","timestamp","time"] if k in c)
+                dt = pd.to_datetime(c[stamp],utc=True).dt.tz_convert("Asia/Seoul")
+                c = c.set_index(dt).sort_index()
+                c = c.loc[(c.index.date==day.date()) & (c.index.time>=day.replace(hour=9).time())]
+                if len(c) >= 300:
+                    minute[code] = c
+                    c.to_csv(OUT/f"dec19_minute_{code}.csv")
+        except (OSError,ValueError,KeyError,TypeError,StopIteration) as exc:
+            print("MINUTE unavailable",code,repr(exc),flush=True)
         try:
             url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.KS"
                    f"?interval=60m&period1={int(day.timestamp())}&period2={int((day+pd.Timedelta(days=1)).timestamp())}")
@@ -412,6 +451,7 @@ def check_december_prices():
                 result = json.load(response)["chart"]["result"][0]
             frame = pd.DataFrame(result["indicators"]["quote"][0],
                                  index=pd.to_datetime(result["timestamp"],unit="s",utc=True).tz_convert("Asia/Seoul"))
+            frame = frame.loc[frame.index.date==day.date()]
             frame.to_csv(OUT/f"dec19_hourly_{code}.csv")
             print("HOURLY",code,frame.to_string().replace("\n"," | "),flush=True)
         except (OSError,ValueError,KeyError,TypeError) as exc:
@@ -428,6 +468,17 @@ def check_december_prices():
             print("NAVER sample",code,rows[:3],flush=True)
         except (OSError, ValueError) as exc:
             print("NAVER unavailable",code,repr(exc),flush=True)
+    if len(minute)==2:
+        car, sam = minute["005380"], minute["005930"]
+        if "low" in car and "high" in sam and car.low.le(279500).any():
+            sold = car.index[car.low.le(279500)][0]
+            if sold not in sam.index:
+                return 106300.
+            print("OBSERVED_MINUTE", str(sold), sam.loc[sold].to_dict(),
+                  sam.loc[sam.index>sold,"high"].max(), sam.loc[sam.high.ge(108000)].index.max(), flush=True)
+            if "close" in sam and 106200 <= sam.at[sold,"close"] <= 107100:
+                return float(sam.at[sold,"close"])
+    return 106300.  # Official closing auction, after the observed Hyundai 10:00-10:59 sale window.
 
 
 def explain_price_order(index, m, order):
