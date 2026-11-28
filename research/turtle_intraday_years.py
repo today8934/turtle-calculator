@@ -28,12 +28,13 @@ def short_mask(dates, codes):
     return ~all_ban[:,None] & ~sector_ban
 
 
-def verify_fills(label, raw, start, dates, codes, restrict, two_sided):
+def verify_fills(label, raw, start, dates, codes, restrict, two_sided, gate=None, flatten=False):
     fills = pd.read_csv(OUT / f"{label}_fills.csv", dtype={"code":str}, parse_dates=["date"])
     daily = pd.read_csv(OUT / f"{label}_daily.csv", parse_dates=["date"])
     assert daily.date.is_monotonic_increasing and daily.equity.iloc[0] == 100_000_000
     if len(fills) == 0:
-        return dict(one_price_directional_fills=0, fees_pct=0, completed=0, losing=0, closed_same_day=0)
+        return dict(one_price_directional_fills=0, fees_pct=0, completed=0, losing=0, winning=0,
+                    closed_same_day=0, avg_win_pct=None, avg_loss_pct=None, forced_exits=0, off_day_exits=0)
     assert fills.date.gt(start).all() and fills.raw_shares.gt(0).all()
     order = pd.MultiIndex.from_frame(fills[["date","phase","fraction"]])
     assert order.is_monotonic_increasing, label
@@ -44,6 +45,12 @@ def verify_fills(label, raw, start, dates, codes, restrict, two_sided):
     assert np.all(price <= bars.High.to_numpy() + .0001)
     opening = ordinary.phase.eq(0).to_numpy()
     np.testing.assert_allclose(price[opening], bars.Open.to_numpy()[opening], rtol=0, atol=.0001)
+    risk_order = ordinary.reason.isin(["entry","add"]).to_numpy()
+    off_day = (~gate[dates.get_indexer(ordinary.date)] if gate is not None
+               else np.zeros(len(ordinary), dtype=bool))
+    assert not (risk_order & off_day).any(), label
+    forced = ordinary.reason.eq("index_exit").to_numpy()
+    assert not forced.any() or (flatten and ordinary.phase.to_numpy()[forced].max()==0), label
     if two_sided:
         shorts = ordinary.loc[ordinary.side.eq(-1) & ordinary.reason.isin(["entry","add"])]
         assert restrict[dates.get_indexer(shorts.date),pd.Index(codes).get_indexer(shorts.code)].all()
@@ -61,27 +68,52 @@ def verify_fills(label, raw, start, dates, codes, restrict, two_sided):
     assert ordinary.shape[0] == fills.shape[0], "Unresolved delisted holding"
     campaigns = {}
     completed = losing = same_day = 0
+    win_returns, loss_returns = [], []
     for record,flow in zip(fills.itertuples(),cashflow):
         if record.reason == "entry":
             assert record.code not in campaigns
-            campaigns[record.code] = [0, 0., record.date]
+            campaigns[record.code] = [0, 0., record.date, 0.]
         c = campaigns[record.code]
         c[0] += 1 if record.reason in ("entry","add") else -1
         c[1] += flow
+        if record.reason in ("entry","add"):
+            c[3] += record.raw_price * record.raw_shares
         if record.reason == "merger_recall":
             c[0] = 0
         if c[0] == 0:
             completed += 1
             losing += c[1] < 0
+            rate = 100*c[1]/c[3]
+            if c[1] > 0:
+                win_returns.append(rate)
+            elif c[1] < 0:
+                loss_returns.append(rate)
             same_day += c[2] == record.date
             del campaigns[record.code]
     return dict(one_price_directional_fills=int(locked.sum()), fees_pct=fee.sum()/1e6,
-                completed=completed, losing=losing, closed_same_day=same_day)
+                completed=completed, losing=losing, winning=len(win_returns), closed_same_day=same_day,
+                avg_win_pct=np.mean(win_returns) if win_returns else None,
+                avg_loss_pct=np.mean(loss_returns) if loss_returns else None,
+                forced_exits=int(forced.sum()), off_day_exits=int((~risk_order & off_day).sum()))
 
 
-def run(path):
+def run(path, sma100=False):
     initial, end = pd.Timestamp("2009-12-30"), pd.Timestamp("2019-12-30")
     index, quotes, ranks, names, _ = market_data(range(2008,2020), initial, end)
+    if sma100:
+        cents = (index*100).round().astype("int64")
+        np.testing.assert_allclose(cents/100,index,rtol=0,atol=.00001)
+        prior = cents.shift(1)
+        trailing_sum = cents.rolling(100,min_periods=100).sum().shift(1)
+        gate = prior.mul(100).gt(trailing_sum)
+        assert trailing_sum.loc["2010":].notna().all()
+        expected = [204,130,164,143,119,133,159,236,47,137]
+        assert gate.loc["2010":].groupby(gate.loc["2010":].index.year).sum().tolist()==expected
+        if path=="near_first":
+            pd.DataFrame({"previous_close":prior/100,"previous_SMA100":trailing_sum/10000,
+                          "permit_new_positions":gate}).loc["2010":].to_csv(OUT/"sma100_days.csv",index_label="trade_date")
+        prior_results = pd.read_csv("research/results/kospi_system1_intraday_2010_2019.csv").set_index(
+            ["year","turnover_top","intraday_path","position_policy"])
     include = ranks.loc["2010":].le(max(SIZES)).any()
     order = include[include].index.to_list()
     assert not set(order).intersection({"114800","251340"})
@@ -114,22 +146,54 @@ def run(path):
             assert (eligible[local.index>previous].sum(axis=1)==size).all()
             args = local, values, last[cols]-begin, codes, names, priority, eligible, phases
             for strategy in ("long", "long_short"):
-                label = f"{path}_{strategy}_{year}_{size}"
-                if strategy == "long":
-                    row = simulate_path(*args,events[0],label,corr,previous)
-                else:
-                    row = simulate_two_sided(*args,events,label,corr,previous,short_eligible=restrict,
-                                             scheduled_recall=MERGER_RECALL)
-                row.update(verify_fills(label,raw,previous,local.index,codes,restrict,strategy=="long_short"))
-                stats.append(dict(year=year,size=size,path=path,strategy=strategy,kospi=benchmark,**row))
+                for mode in (("original","add_gate","flatten") if sma100 else ("original",)):
+                    label = f"{path}_{strategy}_{year}_{size}"
+                    this_gate = None
+                    if mode!="original":
+                        label += f"_{mode}"
+                        this_gate = gate.loc[local.index].to_numpy(dtype=bool)
+                    rules = dict(market_gate=this_gate, force_flat_on_gate=mode=="flatten")
+                    if strategy == "long":
+                        row = simulate_path(*args,events[0],label,corr,previous,**rules)
+                    else:
+                        row = simulate_two_sided(*args,events,label,corr,previous,short_eligible=restrict,
+                                                 scheduled_recall=MERGER_RECALL,**rules)
+                    row.update(verify_fills(label,raw,previous,local.index,codes,restrict,strategy=="long_short",
+                                            this_gate,mode=="flatten"))
+                    if not sma100:
+                        stats.append(dict(year=year,size=size,path=path,strategy=strategy,kospi=benchmark,**row))
+                    elif mode=="original":
+                        base = row
+                        old = prior_results.loc[year,size,path,strategy]
+                        np.testing.assert_allclose([row["ret"],row["mdd"],row["completed"],row["losing"],row["fills"]],
+                            old[["intraday_return_pct","intraday_mdd_pct","fully_closed_positions","losing_closed_positions",
+                                 "fills"]].to_numpy(dtype=float),rtol=0,atol=.00001)
+                    else:
+                        stats.append(dict(year=year,size=size,path=path,strategy=strategy,filter=mode,
+                            days=len(days),allowed=int(gate.iloc[days].sum()),kospi=benchmark,base_ret=base["ret"],
+                            ret=row["ret"],delta=round(row["ret"]-base["ret"],4),base_mdd=base["mdd"],mdd=row["mdd"],
+                            base_closed=base["completed"],base_wins=base["winning"],closed=row["completed"],
+                            wins=row["winning"],losses=row["losing"],flat=row["completed"]-row["winning"]-row["losing"],
+                            avg_win_pct=row["avg_win_pct"],avg_loss_pct=row["avg_loss_pct"],entries=row["entries"],
+                            adds=row["adds"],forced_exits=row["forced_exits"],off_day_exits=row["off_day_exits"]))
         print("FINISHED_YEAR",year,path,flush=True)
     result = pd.DataFrame(stats)
-    assert len(result)==60
-    result.to_csv(OUT / f"calendar_{path}.csv",index=False)
+    assert len(result)==(120 if sma100 else 60)
+    result.to_csv(OUT / f"{'sma100' if sma100 else 'calendar'}_{path}.csv",index=False)
     print("PATH_SUMMARY",path,result.groupby(["strategy","size"]).ret.mean().to_string(),flush=True)
 
 
-def combine():
+def combine(sma100=False):
+    if sma100:
+        result = pd.concat([pd.read_csv(p) for p in sorted(OUT.glob("sma100_*first.csv"))],ignore_index=True)
+        assert len(result)==360 and not result.duplicated(["year","size","path","strategy","filter"]).any()
+        result = result.sort_values(["year","path","filter","strategy","size"]).round(6)
+        result.to_csv(OUT/"sma100_results.csv",index=False)
+        import json
+        print("SMA_FIELDS",",".join(result.columns))
+        for row in result.to_numpy().tolist():
+            print("SMA_ROW",json.dumps([None if pd.isna(x) else x for x in row],separators=(",",":")))
+        return
     results = pd.concat([pd.read_csv(p) for p in sorted(OUT.glob("calendar_*first.csv"))],ignore_index=True)
     assert len(results)==180 and not results.duplicated(["year","size","path","strategy"]).any()
     assert results.groupby("year").kospi.nunique().eq(1).all()
@@ -143,8 +207,9 @@ def combine():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("choice",choices=[*PATHS,"combine"])
-    choice = parser.parse_args().choice
-    if choice == "combine":
-        combine()
+    parser.add_argument("--sma100",action="store_true")
+    args = parser.parse_args()
+    if args.choice == "combine":
+        combine(args.sma100)
     else:
-        run(choice)
+        run(args.choice,args.sma100)

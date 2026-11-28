@@ -15,8 +15,12 @@ SELL_FEE = 0.0025
 
 
 def simulate_path(local_index, m, last, order, names, priority, eligible, phases, events,
-                  label, correlations, start_date):
+                  label, correlations, start_date, market_gate=None, force_flat_on_gate=False):
     history = local_index.index
+    if market_gate is not None:
+        market_gate = np.asarray(market_gate)
+        if market_gate.shape != (len(history),) or market_gate.dtype != np.bool_:
+            raise ValueError("market_gate must contain one boolean per session")
     start = history.get_loc(start_date)
     cash = equity = base = risk_base = float(CAPITAL)
     next_cut = 0.9 * base
@@ -55,6 +59,19 @@ def simulate_path(local_index, m, last, order, names, priority, eligible, phases
             if last[k] < i:
                 for stop, shares in positions.pop(k)["lots"]:
                     record(k, "sell", 0.0, shares, "delisting_zero_recovery", 0., 1.)
+
+        if force_flat_on_gate and market_gate is not None:
+            stage, at = 0, 0.
+            for k, position in list(positions.items()):
+                if not market_gate[i]:
+                    position["index_exit_pending"] = True
+                fill = m["o"][i,k]
+                if not position.get("index_exit_pending") or not np.isfinite(fill) or fill <= 0:
+                    continue
+                for _, quantity in position["lots"]:
+                    cash += fill * quantity * (1-SELL_FEE)
+                    record(k, "sell", fill, quantity, "index_exit", fill, m["factor"][i,k])
+                del positions[k]
 
         for stage, field in enumerate(phases):
             right = m[field][i]
@@ -146,6 +163,8 @@ def simulate_path(local_index, m, last, order, names, priority, eligible, phases
                             del pending[(j,kind2)]
                     continue
 
+                if market_gate is not None and not market_gate[i]:
+                    continue
                 if kind == "entry" and hold is not None:
                     continue
                 if kind == "add" and (hold is None or version != hold["version"] or hold["buys"] >= 4):
@@ -226,8 +245,11 @@ def simulate_path(local_index, m, last, order, names, priority, eligible, phases
     trades.to_csv(OUT / f"{label}_fills.csv", index=False)
     daily.to_csv(OUT / f"{label}_daily.csv", index=False)
     entries = int(trades.reason.eq("entry").sum())
-    return dict(label=label, initial=CAPITAL, final=round(equity), ret=round((equity/CAPITAL-1)*100,4),
+    summary = dict(label=label, initial=CAPITAL, final=round(equity), ret=round((equity/CAPITAL-1)*100,4),
                 mdd=round((daily.equity/daily.equity.cummax()-1).min()*100,4),
                 entries=entries, adds=int(trades.reason.eq("add").sum()), exits=entries-len(positions),
                 delist=int(trades.reason.eq("delisting_zero_recovery").sum()), held=len(positions),
                 fills=len(trades), opening_fills=int(trades.phase.eq(0).sum()), skipped=skipped, retries=retries)
+    if force_flat_on_gate:
+        summary["index_exit_fills"] = int(trades.reason.eq("index_exit").sum())
+    return summary

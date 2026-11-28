@@ -9,7 +9,8 @@ from kospi_system1 import CAPITAL, OUT, TICK_REFORM, executable, room
 
 
 def simulate_two_sided(index, m, last, order, names, priority, eligible, phases, events,
-                       label, correlations, start_date, short_eligible=None, scheduled_recall=None):
+                       label, correlations, start_date, short_eligible=None, scheduled_recall=None,
+                       market_gate=None, force_flat_on_gate=False):
     """Apply coupled OHLC paths. Cash book contains locked short proceeds.
 
     Spendable collateral = equity minus total marked absolute exposure. Existing
@@ -18,6 +19,10 @@ def simulate_two_sided(index, m, last, order, names, priority, eligible, phases,
     Pre-announced corporate-action recalls close shorts at that session's
     closing price, after all other orders. Unknown delistings fail the run.
     """
+    if market_gate is not None:
+        market_gate = np.asarray(market_gate)
+        if market_gate.shape != (len(index),) or market_gate.dtype != np.bool_:
+            raise ValueError("market_gate must contain one boolean per session")
     start = index.index.get_loc(start_date)
     cash_book = equity = risk_base = float(CAPITAL)
     risk_notional = risk_base
@@ -59,6 +64,16 @@ def simulate_two_sided(index, m, last, order, names, priority, eligible, phases,
         for k in list(holdings):
             if last[k] < i:
                 raise ValueError(f"{label}: no corporate-action settlement for {order[k]} at {date}")
+        if force_flat_on_gate and market_gate is not None:
+            for k, pos in list(holdings.items()):
+                if not market_gate[i]:
+                    pos["index_exit_pending"] = True
+                fill = m["o"][i,k]
+                if not pos.get("index_exit_pending") or not np.isfinite(fill) or fill <= 0:
+                    continue
+                for _, qty in pos["lots"].values():
+                    account_fill(k,pos["side"],False,qty,fill,"index_exit",0.,0)
+                del holdings[k]
         pending = {}
         for stage, field in enumerate(phases):
             end = m[field][i]
@@ -150,6 +165,8 @@ def simulate_two_sided(index, m, last, order, names, priority, eligible, phases,
                         del holdings[k]
                     release_pending(t)
                     continue
+                if market_gate is not None and not market_gate[i]:
+                    continue
                 if kind == "entry" and pos is not None:
                     continue
                 if kind == "add" and (not pos or pos["generation"]!=identifier or pos["units_bought"]>=4):
@@ -222,7 +239,7 @@ def simulate_two_sided(index, m, last, order, names, priority, eligible, phases,
     long_pnl = sum(v for (k,s),v in pnl.items() if s==1)
     short_pnl = sum(v for (k,s),v in pnl.items() if s==-1)
     entries = trades.reason.eq("entry")
-    return dict(label=label,initial=CAPITAL,final=round(equity),ret=round(100*(equity/CAPITAL-1),4),
+    summary = dict(label=label,initial=CAPITAL,final=round(equity),ret=round(100*(equity/CAPITAL-1),4),
                 mdd=round(100*(curve.equity/curve.equity.cummax()-1).min(),4),
                 entries=int(entries.sum()),adds=int(trades.reason.eq("add").sum()),
                 exits=int(entries.sum())-len(holdings),held=len(holdings),fills=len(trades),
@@ -231,3 +248,6 @@ def simulate_two_sided(index, m, last, order, names, priority, eligible, phases,
                 short_pnl=round(short_pnl),min_free_collateral=round(shorts_max_deficit),
                 merger_recalls=int(trades.reason.eq("merger_recall").sum()),
                 short_orders_restricted=stopped_by_short_restriction)
+    if force_flat_on_gate:
+        summary["index_exit_fills"] = int(trades.reason.eq("index_exit").sum())
+    return summary
