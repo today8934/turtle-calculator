@@ -1,56 +1,38 @@
-name: KOSPI System 1 research
+name: Verify intraday holdings
 on:
   push:
     branches: [research/kospi-system1-20261127]
 permissions:
+  actions: read
   contents: read
 jobs:
-  backtest:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        path: [high_first, low_first, near_first]
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: python -m pip -q install 'pandas>=2.2,<3' pyarrow numpy
-      - name: Download pinned public market data
-        run: |
-          mkdir -p market output
-          for year in {2008..2019}; do
-            curl -fsSL --retry 3 "https://raw.githubusercontent.com/FinanceData/marcap/ad832658580379c20b8f605797afb10ecfcc690f/data/marcap-$year.parquet" -o "market/$year.parquet"
-            curl -fsSL --retry 3 "https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/259713bf397e5e28fb0da531a19b78a3ca15766b/data/index/year_ks11/$year.csv" -o "market/$year.csv"
-          done
-      - name: Simulate annual accounts on the selected path
-        run: python -u research/turtle_intraday_years.py ${{ matrix.path }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: transactions-${{ matrix.path }}
-          path: output/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: summary-${{ matrix.path }}
-          path: output/calendar_${{ matrix.path }}.csv
-  compare:
-    needs: backtest
+  inspect:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: python -m pip -q install 'pandas>=2.2,<3' numpy
       - uses: actions/download-artifact@v4
         with:
-          pattern: summary-*
-          path: output
+          run-id: 46114396447
+          github-token: ${{ github.token }}
+          pattern: transactions-*
           merge-multiple: true
-      - run: python -u research/turtle_intraday_years.py combine
-      - uses: actions/upload-artifact@v4
-        with:
-          name: intraday-system1-2010-2019
-          path: output/intraday_comparison.csv
+          path: output
+      - name: Read corporate actions and execution costs
+        run: |
+          python - <<'PY'
+          import csv,glob,collections
+          from pathlib import Path
+          agg=collections.defaultdict(list)
+          for p in glob.glob('output/*_fills.csv'):
+              stem=Path(p).stem
+              cost=0
+              with open(p) as f:
+                  for r in csv.DictReader(f):
+                      if int(r['phase'])<0:
+                          print('REMOVAL',stem,r['date'],r['code'],r.get('side'),r['raw_shares'])
+                      cost+=float(r['raw_price'])*float(r['raw_shares'])*(.0005 if r['action']=='buy' else .0025)
+              if 'near_first_' in stem:
+                  variant,year,n=stem.removesuffix('_fills').removeprefix('near_first_').rsplit('_',2)
+                  agg[(variant,n)].append(cost/1e6)
+          for k,x in sorted(agg.items()):
+              print('MEAN_COST',k,round(sum(x)/len(x),4))
+          PY
