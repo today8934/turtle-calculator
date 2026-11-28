@@ -21,12 +21,15 @@ jobs:
             curl -fsSL --retry 3 "https://raw.githubusercontent.com/FinanceData/marcap/ad832658580379c20b8f605797afb10ecfcc690f/data/marcap-$year.parquet" -o "market/$year.parquet"
             curl -fsSL --retry 3 "https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/259713bf397e5e28fb0da531a19b78a3ca15766b/data/index/year_ks11/$year.csv" -o "market/$year.csv"
           done
+          for code in 114800 251340; do
+            curl -fsSL --retry 3 "https://raw.githubusercontent.com/QuantKang/stock_data/6e439fca6b7e0a87d2c43c5bf7275e2a97dab11b/D/${code}_D.csv" -o "market/${code}_D.csv"
+          done
       - name: Validate data and run simulation
         run: python -u research/kospi_system1.py --calendar-years --calendar-range 2010 2019
-      - name: Cross-check every recorded close, cash flow and daily valuation
-        run: python -u research/audit_calendar.py
+      - name: Replay accounts with two cash-purchased inverse ETFs
+        run: python -u research/inverse_calendar.py
       - uses: actions/upload-artifact@v4
         with:
-          name: kospi-annual-close-2010-2019
+          name: kospi-annual-inverse-2010-2019
           path: output/
           if-no-files-found: ignore

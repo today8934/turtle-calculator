@@ -99,7 +99,9 @@ def data(max_size=TOP):
 TICK_REFORM = pd.Timestamp("2023-01-25")
 
 
-def ticks(price, old=False):
+def ticks(price, old=False, etf=False):
+    if etf:
+        return 5
     modern = np.select([price < 2000, price < 5000, price < 20000, price < 50000, price < 200000, price < 500000],
                        [1, 5, 10, 50, 100, 500], default=1000)
     if not np.any(old):
@@ -109,10 +111,10 @@ def ticks(price, old=False):
     return np.where(old,original,modern)
 
 
-def trigger(adjusted, factor, up, touch=False):
+def trigger(adjusted, factor, up, touch=False, etf=False):
     raw = adjusted / factor
     # A strict downward break at an exact tick-band boundary uses the lower band's increment.
-    tick = ticks(raw + (1e-7 if up else -1e-7), factor.index < TICK_REFORM)
+    tick = ticks(raw + (1e-7 if up else -1e-7), factor.index < TICK_REFORM, etf)
     units = raw / tick
     if touch:
         steps = np.ceil(units-1e-9) if up else np.floor(units+1e-9)
@@ -121,16 +123,18 @@ def trigger(adjusted, factor, up, touch=False):
     return steps * tick * factor
 
 
-def executable(price, factor, up, old=False):
+def executable(price, factor, up, old=False, etf=False):
     raw = price / factor
-    tick = float(ticks(raw + (1e-7 if up else -1e-7), old))
+    tick = float(ticks(raw + (1e-7 if up else -1e-7), old, etf))
     units = raw / tick
     return (math.ceil(units - 1e-9) if up else math.floor(units + 1e-9)) * tick * factor
 
 
-def panels(index, data, order, use_closes_for_channels=False):
+def panels(index, data, order, use_closes_for_channels=False, etf_codes=()):
     fields = "o h l c factor n u20 d20 u55 d10 u10 touch_low10 touch_high10".split()
     mats = {k: np.full((len(index), len(order)), np.nan) for k in fields}
+    etfs = pd.Index(order).isin(etf_codes)
+    mats["etf"] = np.broadcast_to(etfs, mats["c"].shape)
     last = np.zeros(len(order), dtype=int)
     mapping = {code: i for i, code in enumerate(order)}
     adjustments = 0
@@ -163,17 +167,22 @@ def panels(index, data, order, use_closes_for_channels=False):
             if use_closes_for_channels:
                 bounds = c
             channel = bounds.rolling(length).max() if up else bounds.rolling(length).min()
-            values[key] = trigger(channel.shift(), factor, up)
+            values[key] = trigger(channel.shift(), factor, up, etf=etfs[k])
             if length == 10:
-                values["touch_high10" if up else "touch_low10"] = trigger(channel.shift(),factor,up,touch=True)
+                values["touch_high10" if up else "touch_low10"] = trigger(channel.shift(),factor,up,touch=True,etf=etfs[k])
         for field, arr in values.items():
             mats[field][pos, k] = arr
     return mats, last, adjustments
 
 
+def etf_flags(m):
+    return m["etf"][0] if "etf" in m else np.zeros(m["c"].shape[1], dtype=bool)
+
+
 def breakout_events(m, reverse, phases=None, open_stages=(0,)):
     # Track every instrument before the test begins. The previous hypothetical trade may be long or short.
     rows, cols = m["o"].shape
+    etfs = etf_flags(m)
     if phases is not None:
         phases = list(phases)
     elif reverse == "near":
@@ -213,13 +222,13 @@ def breakout_events(m, reverse, phases=None, open_stages=(0,)):
                     side, pending55 = 0, False
                 if not side and rising and p >= u and (gap or prev < u) and not entered_long:
                     fill = p if gap else u
-                    side, stop = 1, executable(fill - 2*n, f, False)
+                    side, stop = 1, executable(fill - 2*n, f, False, etf=etfs[k])
                     pending55, entered_long = won, True
                     if not won:
                         events[i, phase, k] = fill
                 elif not side and falling and p <= down and (gap or prev > down) and not entered_short:
                     fill = p if gap else down
-                    side, stop = -1, executable(fill + 2*n, f, True)
+                    side, stop = -1, executable(fill + 2*n, f, True, etf=etfs[k])
                     pending55, entered_short = False, True
                 if side == 1 and pending55 and rising and p >= far and (gap or prev < far):
                     events[i, phase, k] = p if gap else far
@@ -253,24 +262,26 @@ def room(k, pos, corr):
     return bool(((pairs >= .70) @ units <= 6).all() and ((pairs >= .40) @ units <= 10).all())
 
 
-def executable_stop(stop, factor, up, old, strict):
+def executable_stop(stop, factor, up, old, strict, etf=False):
     if not strict:
-        return executable(stop,factor,up,old)
+        return executable(stop,factor,up,old,etf)
     raw = stop/factor
-    step = float(ticks(raw+(1e-7 if up else -1e-7),old))
+    step = float(ticks(raw+(1e-7 if up else -1e-7),old,etf))
     units = math.floor(raw/step+1e-9)+1 if up else math.ceil(raw/step-1e-9)-1
     return units*step*factor
 
 
 def simulate(index, m, last, order, names, priority, eligible, phases, events, label, correlations,
              buy_fee=.0005, sell_fee=.0025, retry=False, align_dec19=None, closing_auction=False,
-             open_stages=(0,), start_date=START, intraday_exit=None):
+             open_stages=(0,), start_date=START, intraday_exit=None, etf_sell_fee=.0005):
     initial = CAPITAL
     cash = equity = float(initial)
     annual_base = notional = float(initial)
     next_cut = annual_base * .90
     pos, marks, ledger, curve = {}, {}, [], []
     history = index.index
+    etfs = etf_flags(m)
+    sale_rates = pd.Series(np.where(etfs, etf_sell_fee, sell_fee), index=order)
     start = history.get_loc(start_date)
     curve.append([start_date.date(), equity, cash, 0, index.at[start_date]])
     def record(k, action, price, qty, cause, exit_line=np.nan):
@@ -284,11 +295,11 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
             held = dict(qty=0.,units=0,unit=qty,n=n,latest=fill,lots=[])
             pos[k] = held
         else:
-            held["lots"] = [(executable(s + .5*n, fac, False, old_tick), q) for s,q in held["lots"]]
+            held["lots"] = [(executable(s + .5*n, fac, False, old_tick, etfs[k]), q) for s,q in held["lots"]]
         held["qty"] += qty
         held["units"] += 1
         held["latest"] = fill
-        held["lots"].append((executable(fill - 2*n, fac, False, old_tick), qty))
+        held["lots"].append((executable(fill - 2*n, fac, False, old_tick, etfs[k]), qty))
         record(k, "buy", fill, qty, "entry" if held["units"]==1 else "add")
         waiting.pop(k, None)
         return held
@@ -340,7 +351,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                     channel = m["touch_low10" if intraday_exit in ("literal","touch") else "d10"][i,k]
                     remaining = []
                     for stop, qty in sorted(hold["lots"], reverse=True):
-                        live_stop = executable_stop(stop,fac,False,old_tick,intraday_exit=="literal") if intraday_exit else stop
+                        live_stop = executable_stop(stop,fac,False,old_tick,intraday_exit=="literal",etfs[k]) if intraday_exit else stop
                         level = max(live_stop, channel)
                         if target > level:
                             remaining.append((stop, qty))
@@ -349,7 +360,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                             px = min(m["o"][i,k],level)
                         else:
                             px = target if gap else min(previous, level)
-                        cash += qty * px * (1 - sell_fee)
+                        cash += qty * px * (1 - sale_rates.iloc[k])
                         sales += 1
                         waiting.pop(k, None)
                         record(k, "sell", px, qty, "2N" if live_stop >= channel else "10D",level)
@@ -374,7 +385,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                 while hold["units"] < 4:
                     if align_today and order[k] == "005930":
                         break
-                    level = executable(hold["latest"] + .5*hold["n"], fac, True, old_tick)
+                    level = executable(hold["latest"] + .5*hold["n"], fac, True, old_tick, etfs[k])
                     if target < level or not room(k, pos, correlations[i]):
                         break
                     px = target if gap else max(previous, level)
@@ -432,7 +443,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
         assert executions.loc[executions.action.eq("sell"),"phase"].eq(0).all()
         buys = executions.loc[executions.action.eq("buy")]
         assert buys.phase.eq(1).all() and not buys.duplicated(["date","code"]).any()
-    cash_changes = trades.raw_price * trades.raw_shares * np.where(trades.action.eq("sell"), 1-sell_fee, -1-buy_fee)
+    cash_changes = trades.raw_price * trades.raw_shares * np.where(trades.action.eq("sell"), 1-trades.code.map(sale_rates), -1-buy_fee)
     assert np.isclose(initial + cash_changes.sum(), cash, atol=.01, rtol=0)
     attribution = cash_changes.groupby(trades.code).sum()
     for k,p in pos.items():
@@ -463,6 +474,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
 def close_signals(m, calendar=None, shadow_intraday=False):
     """At each closing print, finish the shadow trade before checking for a fresh breakout."""
     dates, codes = m["c"].shape
+    etfs = etf_flags(m)
     old_tick = np.zeros(dates,dtype=bool) if calendar is None else calendar < TICK_REFORM
     events = np.full((dates, 2, codes), np.nan)
     for k in range(codes):
@@ -472,8 +484,8 @@ def close_signals(m, calendar=None, shadow_intraday=False):
             c, f, n = m["c"][i,k], m["factor"][i,k], m["n"][i,k]
             long_level, short_level = max(stop,m["d10"][i,k]), min(stop,m["u10"][i,k])
             if shadow_intraday and side:
-                long_level = max(executable_stop(stop,f,False,old_tick[i],True),m["touch_low10"][i,k])
-                short_level = min(executable_stop(stop,f,True,old_tick[i],True),m["touch_high10"][i,k])
+                long_level = max(executable_stop(stop,f,False,old_tick[i],True,etfs[k]),m["touch_low10"][i,k])
+                short_level = min(executable_stop(stop,f,True,old_tick[i],True,etfs[k]),m["touch_high10"][i,k])
             if side == 1 and (m["l"][i,k] if shadow_intraday else c) <= long_level:
                 exit_price = min(m["o"][i,k],long_level) if shadow_intraday else c
                 previous_won = exit_price > fill + 1e-7
@@ -484,12 +496,12 @@ def close_signals(m, calendar=None, shadow_intraday=False):
                 side, waiting_for_55 = 0, False
             if side == 0:
                 if c >= m["u20"][i,k]:
-                    side, fill, stop = 1, c, executable(c - 2*n,f,False,old_tick[i])
+                    side, fill, stop = 1, c, executable(c - 2*n,f,False,old_tick[i],etfs[k])
                     waiting_for_55 = previous_won
                     if not previous_won:
                         events[i,1,k] = c
                 elif c <= m["d20"][i,k]:
-                    side, fill, stop = -1, c, executable(c + 2*n,f,True,old_tick[i])
+                    side, fill, stop = -1, c, executable(c + 2*n,f,True,old_tick[i],etfs[k])
             if side == 1 and waiting_for_55 and c >= m["u55"][i,k]:
                 events[i,1,k] = c
                 waiting_for_55 = False
@@ -826,4 +838,3 @@ if __name__ == "__main__":
         close_study(tuple(dict.fromkeys(args.close_sizes)))
     else:
         main()
-
