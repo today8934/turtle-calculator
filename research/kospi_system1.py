@@ -15,12 +15,13 @@ START = pd.Timestamp("2025-11-28")
 END = pd.Timestamp("2026-11-27")
 CAPITAL = 100_000_000
 TOP = 30
+CLOSE_UNIVERSE_SIZES = (20, 30, 40, 50)
 YEARS = range(2024, 2027)
 OUT = Path("output")
 OUT.mkdir(exist_ok=True)
 
 
-def data():
+def data(max_size=TOP):
     indexes = [pd.read_csv(f"market/{y}.csv", parse_dates=["Date"]).set_index("Date")["Close"] for y in YEARS]
     index = pd.concat(indexes).sort_index().loc[:END]
     assert index.index.is_unique and index.at[START] == 3926.59 and index.at[END] == 4915.68
@@ -81,8 +82,8 @@ def data():
             overlap = pd.DataFrame({"common":common, "different_slots":size-common})
             overlap["rolling_codes"] = daily.apply(lambda row: " ".join(row.index[row]), axis=1)
             overlap.to_csv(OUT/"top30_overlap_by_date.csv")
-    final = set(year.head(TOP).index)
-    order = sorted(set(test.columns[test.le(TOP).any()]).union(final))
+    final = year.head(max_size).index.tolist()
+    order = sorted(set(test.columns[test.le(max_size).any()]).union(final))
     return index, d.loc[d.Code.isin(order)], order, names, ranks[order], final
 
 
@@ -437,9 +438,7 @@ def close_signals(m):
 
 
 def close_study():
-    index, quotes, order, names, ranks, annual = data()
-    rolling = ranks.le(TOP).to_numpy()
-    hindsight = np.broadcast_to([c in annual for c in order], rolling.shape)
+    index, quotes, order, names, ranks, annual = data(max(CLOSE_UNIVERSE_SIZES))
     reference = index.loc[START:END]
     print("CLOSE_BENCHMARK", len(reference)-1, reference.iloc[0], reference.iloc[-1],
           (reference.iloc[-1]/reference.iloc[0]-1)*100, (reference/reference.cummax()-1).min()*100, flush=True)
@@ -448,10 +447,19 @@ def close_study():
         m, last, _ = panels(index, quotes, order, use_closes_for_channels=use_closes)
         priority, correlations = correlation_limits(index, m)
         signals = close_signals(m)
-        for selection, eligible in [("rolling",rolling), ("annual",hindsight)]:
-            label = f"close_{basis}_{selection}"
-            results.append(simulate(index,m,last,order,names,priority,eligible,("c","c"),signals,
-                                    label,correlations,closing_auction=True))
+        for size in CLOSE_UNIVERSE_SIZES:
+            rolling = ranks.le(size).to_numpy()
+            hindsight = np.broadcast_to(np.isin(order,annual[:size]),rolling.shape)
+            for selection, eligible in [("rolling",rolling), ("annual",hindsight)]:
+                assert np.all(eligible[index.index>START].sum(axis=1)==size)
+                label = f"close_{basis}_{selection}_top{size}"
+                stats = simulate(index,m,last,order,names,priority,eligible,("c","c"),signals,
+                                 label,correlations,closing_auction=True)
+                results.append(dict(size=size,basis=basis,selection=selection,**stats))
+                if not use_closes and selection == "rolling":
+                    gains = pd.read_csv(OUT/f"{label}_stock_profit.csv",dtype={"code":str}).set_index("code").profit_krw
+                    print("TOP_CONTRIBUTORS", size,
+                          [(names[c],round(v)) for c,v in gains.nlargest(3).items()],flush=True)
     pd.DataFrame(results).to_csv(OUT/"summary.csv",index=False)
 
 
