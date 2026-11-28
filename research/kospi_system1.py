@@ -107,12 +107,16 @@ def ticks(price, old=False):
     return np.where(old,original,modern)
 
 
-def trigger(adjusted, factor, up):
+def trigger(adjusted, factor, up, touch=False):
     raw = adjusted / factor
     # A strict downward break at an exact tick-band boundary uses the lower band's increment.
     tick = ticks(raw + (1e-7 if up else -1e-7), factor.index < TICK_REFORM)
     units = raw / tick
-    return ((np.floor(units + 1e-9) + 1 if up else np.ceil(units - 1e-9) - 1) * tick) * factor
+    if touch:
+        steps = np.ceil(units-1e-9) if up else np.floor(units+1e-9)
+    else:
+        steps = np.floor(units + 1e-9) + 1 if up else np.ceil(units - 1e-9) - 1
+    return steps * tick * factor
 
 
 def executable(price, factor, up, old=False):
@@ -123,7 +127,7 @@ def executable(price, factor, up, old=False):
 
 
 def panels(index, data, order, use_closes_for_channels=False):
-    fields = "o h l c factor n u20 d20 u55 d10 u10".split()
+    fields = "o h l c factor n u20 d20 u55 d10 u10 touch_low10 touch_high10".split()
     mats = {k: np.full((len(index), len(order)), np.nan) for k in fields}
     last = np.zeros(len(order), dtype=int)
     mapping = {code: i for i, code in enumerate(order)}
@@ -158,6 +162,8 @@ def panels(index, data, order, use_closes_for_channels=False):
                 bounds = c
             channel = bounds.rolling(length).max() if up else bounds.rolling(length).min()
             values[key] = trigger(channel.shift(), factor, up)
+            if length == 10:
+                values["touch_high10" if up else "touch_low10"] = trigger(channel.shift(),factor,up,touch=True)
         for field, arr in values.items():
             mats[field][pos, k] = arr
     return mats, last, adjustments
@@ -245,9 +251,18 @@ def room(k, pos, corr):
     return bool(((pairs >= .70) @ units <= 6).all() and ((pairs >= .40) @ units <= 10).all())
 
 
+def executable_stop(stop, factor, up, old, strict):
+    if not strict:
+        return executable(stop,factor,up,old)
+    raw = stop/factor
+    step = float(ticks(raw+(1e-7 if up else -1e-7),old))
+    units = math.floor(raw/step+1e-9)+1 if up else math.ceil(raw/step-1e-9)-1
+    return units*step*factor
+
+
 def simulate(index, m, last, order, names, priority, eligible, phases, events, label, correlations,
              buy_fee=.0005, sell_fee=.0025, retry=False, align_dec19=None, closing_auction=False,
-             open_stages=(0,), start_date=START):
+             open_stages=(0,), start_date=START, intraday_exit=None):
     initial = CAPITAL
     cash = equity = float(initial)
     annual_base = notional = float(initial)
@@ -256,9 +271,9 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
     history = index.index
     start = history.get_loc(start_date)
     curve.append([start_date.date(), equity, cash, 0, index.at[start_date]])
-    def record(k, action, price, qty, cause):
+    def record(k, action, price, qty, cause, exit_line=np.nan):
         ledger.append([history[i].date(), stage, order[k], names[order[k]], action,
-                       price / fac if fac else 0, qty * fac if fac else qty, cause, cash])
+                       price / fac if fac else 0, qty * fac if fac else qty, cause, cash, exit_line / fac])
 
     def buy_lot(k, fill, qty, n, held):
         nonlocal cash
@@ -320,18 +335,22 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                     rising, falling = gap or target > previous, gap or target < previous
                 hold = pos.get(k)
                 if hold is not None and falling:
-                    channel = m["d10"][i,k]
+                    channel = m["touch_low10" if intraday_exit in ("literal","touch") else "d10"][i,k]
                     remaining = []
                     for stop, qty in sorted(hold["lots"], reverse=True):
-                        level = max(stop, channel)
+                        live_stop = executable_stop(stop,fac,False,old_tick,intraday_exit=="literal") if intraday_exit else stop
+                        level = max(live_stop, channel)
                         if target > level:
                             remaining.append((stop, qty))
                             continue
-                        px = target if gap else min(previous, level)
+                        if intraday_exit:
+                            px = min(m["o"][i,k],level)
+                        else:
+                            px = target if gap else min(previous, level)
                         cash += qty * px * (1 - sell_fee)
                         sales += 1
                         waiting.pop(k, None)
-                        record(k, "sell", px, qty, "2N" if stop >= channel else "10D")
+                        record(k, "sell", px, qty, "2N" if live_stop >= channel else "10D",level)
                     hold["lots"] = remaining
                     hold["qty"] = sum(q for _,q in remaining)
                     if not remaining:
@@ -393,13 +412,21 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
         assert cash > -1e-4 and equity >= 0 and sum(len(p["lots"]) for p in pos.values()) <= 12
         curve.append([history[i].date(), equity, cash, len(pos), index.iloc[i]])
     curve = pd.DataFrame(curve, columns=["date","equity","cash","holdings","index"])
-    trades = pd.DataFrame(ledger, columns=["date","phase","code","name","action","raw_price","raw_shares","reason","cash_after"])
+    trades = pd.DataFrame(ledger, columns=["date","phase","code","name","action","raw_price","raw_shares","reason","cash_after","exit_line"])
     if closing_auction:
         executions = trades.loc[trades.reason.ne("delisting_zero_recovery")]
         trade_dates = history.get_indexer(pd.to_datetime(executions.date))
         trade_codes = pd.Index(order).get_indexer(executions.code)
         assert (trade_dates >= 0).all() and (trade_codes >= 0).all()
-        assert np.allclose(executions.raw_price, (m["c"]/m["factor"])[trade_dates,trade_codes], atol=1e-6, rtol=0)
+        close_check = (m["c"]/m["factor"])[trade_dates,trade_codes]
+        is_sell = executions.action.eq("sell").to_numpy()
+        if intraday_exit:
+            op = (m["o"]/m["factor"])[trade_dates,trade_codes][is_sell]
+            low = (m["l"]/m["factor"])[trade_dates,trade_codes][is_sell]
+            levels = executions.loc[is_sell,"exit_line"].to_numpy()
+            assert (low <= levels + 1e-6).all()
+            close_check[is_sell] = np.minimum(op,levels)
+        assert np.allclose(executions.raw_price, close_check, atol=1e-6, rtol=0)
         assert executions.loc[executions.action.eq("sell"),"phase"].eq(0).all()
         buys = executions.loc[executions.action.eq("buy")]
         assert buys.phase.eq(1).all() and not buys.duplicated(["date","code"]).any()
@@ -431,7 +458,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
     return summary
 
 
-def close_signals(m, calendar=None):
+def close_signals(m, calendar=None, shadow_intraday=False):
     """At each closing print, finish the shadow trade before checking for a fresh breakout."""
     dates, codes = m["c"].shape
     old_tick = np.zeros(dates,dtype=bool) if calendar is None else calendar < TICK_REFORM
@@ -441,11 +468,17 @@ def close_signals(m, calendar=None):
         fill = stop = np.nan
         for i in np.flatnonzero((m["n"][:,k] > 0) & np.isfinite(m["u20"][:,k])):
             c, f, n = m["c"][i,k], m["factor"][i,k], m["n"][i,k]
-            if side == 1 and c <= max(stop,m["d10"][i,k]):
-                previous_won = c > fill + 1e-7
+            long_level, short_level = max(stop,m["d10"][i,k]), min(stop,m["u10"][i,k])
+            if shadow_intraday and side:
+                long_level = max(executable_stop(stop,f,False,old_tick[i],True),m["touch_low10"][i,k])
+                short_level = min(executable_stop(stop,f,True,old_tick[i],True),m["touch_high10"][i,k])
+            if side == 1 and (m["l"][i,k] if shadow_intraday else c) <= long_level:
+                exit_price = min(m["o"][i,k],long_level) if shadow_intraday else c
+                previous_won = exit_price > fill + 1e-7
                 side, waiting_for_55 = 0, False
-            elif side == -1 and c >= min(stop,m["u10"][i,k]):
-                previous_won = c < fill - 1e-7
+            elif side == -1 and (m["h"][i,k] if shadow_intraday else c) >= short_level:
+                exit_price = max(m["o"][i,k],short_level) if shadow_intraday else c
+                previous_won = exit_price < fill - 1e-7
                 side, waiting_for_55 = 0, False
             if side == 0:
                 if c >= m["u20"][i,k]:
@@ -487,7 +520,7 @@ def close_study(sizes):
     pd.DataFrame(results).to_csv(OUT/"summary.csv",index=False)
 
 
-def calendar_year_study():
+def calendar_year_study(compare_exits=False):
     sizes = (10,20,30)
     index,quotes,ranks,names,_ = market_data(range(2018,END.year+1),pd.Timestamp("2019-12-30"),END)
     years = range(2020,END.year+1)
@@ -501,6 +534,9 @@ def calendar_year_study():
     m, last, _ = panels(index,quote_subset,order)
     signals = close_signals(m,index.index)
     stats = []
+    alternatives = []
+    if compare_exits:
+        parallel_signals = close_signals(m,index.index,shadow_intraday=True)
     for year in years:
         days = np.flatnonzero(index.index.year==year)
         previous = index.index[days[0]-1]
@@ -514,6 +550,8 @@ def calendar_year_study():
         codes = [order[k] for k in cols]
         values = {key: a[begin:stop,cols] for key,a in m.items()}
         events = signals[begin:stop][:,:,cols]
+        if compare_exits:
+            parallel_events = parallel_signals[begin:stop][:,:,cols]
         priority,corr = correlation_limits(local_index,values,start_date=previous)
         eligible_rank = ranks.iloc[begin:stop].loc[:,codes]
         print("PERIOD",year,str(previous.date()),str(index.index[days[0]].date()),
@@ -535,10 +573,27 @@ def calendar_year_study():
                           filled[["date","action","raw_price","raw_shares"]].round(2).values.tolist(),flush=True)
             stats.append(dict(year=year,size=size,kospi_return=benchmark,sessions=len(days),
                               first=str(index.index[days[0]].date()),last=str(index.index[days[-1]].date()),**row))
+            if compare_exits:
+                for variant,exit_rule,entries in [("only_sells","literal",events),("both_touch","touch",events),
+                                                  ("same_lines","old_lines",events),("shadow_also","literal",parallel_events)]:
+                    label = f"{variant}_{year}_top{size}"
+                    changed = simulate(local_index,values,last[cols]-begin,codes,names,priority,eligible,("l","c"),
+                                       entries,label,corr,closing_auction=True,start_date=previous,intraday_exit=exit_rule)
+                    alternatives.append(dict(year=year,size=size,variant=variant,baseline=row["ret"],
+                                             delta=round(changed["ret"]-row["ret"],4),**changed))
+                    if year==2020 and variant=="only_sells" and size in (20,30):
+                        gains = pd.read_csv(OUT/f"{label}_stock_profit.csv",dtype={"code":str}).set_index("code")
+                        print("HYBRID_SHINPOONG",size,gains.profit_krw.get("019170",0),flush=True)
     result = pd.DataFrame(stats)
     assert len(result)==len(sizes)*len(years)
     result.to_csv(OUT/"calendar_summary.csv",index=False)
     print("CALENDAR_RESULTS",result[["year","size","ret","mdd","kospi_return","delist"]].to_json(orient="records"),flush=True)
+    if compare_exits:
+        comparison = pd.DataFrame(alternatives)
+        assert len(comparison)==len(result)*4
+        comparison.to_csv(OUT/"intraday_exit_comparison.csv",index=False)
+        for variant,part in comparison.groupby("variant"):
+            print("EXIT_COMPARISON",variant,part[["year","size","ret","baseline","delta","mdd"]].to_json(orient="records"),flush=True)
 
 
 def intraday_study():
@@ -748,9 +803,10 @@ if __name__ == "__main__":
     parser.add_argument("--close-sizes", type=int, nargs="+", default=CLOSE_UNIVERSE_SIZES)
     parser.add_argument("--intraday", action="store_true")
     parser.add_argument("--calendar-years", action="store_true")
+    parser.add_argument("--compare-exits", action="store_true")
     args = parser.parse_args()
     if args.calendar_years:
-        calendar_year_study()
+        calendar_year_study(compare_exits=args.compare_exits)
     elif args.intraday:
         intraday_study()
     elif args.close_only:
