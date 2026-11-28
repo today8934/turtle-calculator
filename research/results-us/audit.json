@@ -1,0 +1,914 @@
+{
+  "run": 46121334867,
+  "data_revision": "l5fsch0qd975m16dtl285tfbvidomgjt",
+  "code_revision": "8a0a2e6503c13a0ff593d95fb324f5a012f4345c",
+  "daily_gap_checks": {
+    "attempted": 3559,
+    "repaired": 2359,
+    "symbols": 935,
+    "missing_before": 3559,
+    "missing_after": 1200
+  },
+  "unresolved_examples": [
+    {
+      "date": "2014-08-19T00:00:00.000",
+      "symbol": "AAPL",
+      "left": "2014-08-18T00:00:00.000",
+      "right": "2014-08-20T00:00:00.000",
+      "local_adv": 5648636366.499782,
+      "nearby_peak": 18603034527.45,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:price_basis_or_identity_disagreement"
+    },
+    {
+      "date": "2014-09-09T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-09-08T00:00:00.000",
+      "right": "2014-09-10T00:00:00.000",
+      "local_adv": 1432366116.0518181,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-09-29T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-09-26T00:00:00.000",
+      "right": "2014-10-07T00:00:00.000",
+      "local_adv": 1421221827.3370833,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-09-30T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-09-26T00:00:00.000",
+      "right": "2014-10-07T00:00:00.000",
+      "local_adv": 1421221827.3370833,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-10-01T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-09-26T00:00:00.000",
+      "right": "2014-10-07T00:00:00.000",
+      "local_adv": 1421221827.3370833,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-10-02T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-09-26T00:00:00.000",
+      "right": "2014-10-07T00:00:00.000",
+      "local_adv": 1421221827.3370833,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-10-03T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-09-26T00:00:00.000",
+      "right": "2014-10-07T00:00:00.000",
+      "local_adv": 1421221827.3370833,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-10-06T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-09-26T00:00:00.000",
+      "right": "2014-10-07T00:00:00.000",
+      "local_adv": 1421221827.3370833,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-10-08T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-10-07T00:00:00.000",
+      "right": "2014-10-16T00:00:00.000",
+      "local_adv": 1418643980.1211998,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-10-09T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-10-07T00:00:00.000",
+      "right": "2014-10-16T00:00:00.000",
+      "local_adv": 1418643980.1211998,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-10-10T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-10-07T00:00:00.000",
+      "right": "2014-10-16T00:00:00.000",
+      "local_adv": 1418643980.1211998,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-10-13T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-10-07T00:00:00.000",
+      "right": "2014-10-16T00:00:00.000",
+      "local_adv": 1418643980.1211998,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-10-14T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-10-07T00:00:00.000",
+      "right": "2014-10-16T00:00:00.000",
+      "local_adv": 1418643980.1211998,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2014-10-15T00:00:00.000",
+      "symbol": "GOOG",
+      "left": "2014-10-07T00:00:00.000",
+      "right": "2014-10-16T00:00:00.000",
+      "local_adv": 1418643980.1211998,
+      "nearby_peak": 4671053946,
+      "recovered": false,
+      "source_or_reason": "SP500-archive:additional_anchors_disagree"
+    },
+    {
+      "date": "2021-10-22T00:00:00.000",
+      "symbol": "DWAC",
+      "left": "2021-10-21T00:00:00.000",
+      "right": "2021-10-25T00:00:00.000",
+      "local_adv": 1229149071.1647198,
+      "nearby_peak": 22694604705.5,
+      "recovered": false,
+      "source_or_reason": "Kibot-raw:price_basis_or_identity_disagreement"
+    }
+  ],
+  "stock_distributions": [
+    {
+      "date": "2011-01-04",
+      "parent": "MSI",
+      "child": "MMI",
+      "shares": 0.875,
+      "child_raw_close": 33.12,
+      "cash_per_parent": 28.98,
+      "spin_ratio": 0.5784727273,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.motorolasolutions.com/content/dam/msi/investors/doc_downloads/StockOwnership_CompanyActions/msi-and-mmi-shareholder-tax-basis-information-and-irs-form-8937.pdf"
+    },
+    {
+      "date": "2011-07-01",
+      "parent": "MRO",
+      "child": "MPC",
+      "shares": 0.5,
+      "child_raw_close": 42.2,
+      "cash_per_parent": null,
+      "spin_ratio": null,
+      "upstream_factor_ratio": null,
+      "status": "outside_ranked_symbol_history",
+      "source": "https://www.sec.gov/Archives/edgar/data/101778/000119312511151791/dex991.htm"
+    },
+    {
+      "date": "2012-05-01",
+      "parent": "COP",
+      "child": "PSX",
+      "shares": 0.5,
+      "child_raw_close": 32.76,
+      "cash_per_parent": 16.38,
+      "spin_ratio": 0.7752778159,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://infomemo.theocc.com/infomemos?number=30483"
+    },
+    {
+      "date": "2012-10-02",
+      "parent": "MDLZ",
+      "child": "KRFT",
+      "shares": 0.3333333333,
+      "child_raw_close": 45.42,
+      "cash_per_parent": 15.14,
+      "spin_ratio": 0.6491146751,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.mondelezinternational.com/investors/stock/spin-off-information/"
+    },
+    {
+      "date": "2013-01-02",
+      "parent": "ABT",
+      "child": "ABBV",
+      "shares": 1,
+      "child_raw_close": 35.12,
+      "cash_per_parent": 35.12,
+      "spin_ratio": 0.4771475361,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://infomemo.theocc.com/infomemos?number=31854"
+    },
+    {
+      "date": "2014-04-03",
+      "parent": "GOOGL",
+      "child": "GOOG",
+      "shares": 1,
+      "child_raw_close": 569.74,
+      "cash_per_parent": 569.74,
+      "spin_ratio": 0.5007710911,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://s206.q4cdn.com/479360582/files/doc_downloads/additional/2014-form8937.pdf"
+    },
+    {
+      "date": "2014-06-09",
+      "parent": "TWX",
+      "child": "TIME",
+      "shares": 0.125,
+      "child_raw_close": null,
+      "cash_per_parent": null,
+      "spin_ratio": null,
+      "upstream_factor_ratio": null,
+      "status": "outside_ranked_symbol_history",
+      "source": "https://www.sec.gov/Archives/edgar/data/1105705/000110570514000031/exhibit991.htm"
+    },
+    {
+      "date": "2015-07-01",
+      "parent": "BAX",
+      "child": "BXLT",
+      "shares": 1,
+      "child_raw_close": 31.5,
+      "cash_per_parent": 31.5,
+      "spin_ratio": 0.5523024446,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.sec.gov/Archives/edgar/data/10456/000119312515246136/d57625d8k.htm"
+    },
+    {
+      "date": "2015-07-20",
+      "parent": "EBAY",
+      "child": "PYPL",
+      "shares": 1,
+      "child_raw_close": 40.47,
+      "cash_per_parent": 40.47,
+      "spin_ratio": 0.4138180765,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.sec.gov/Archives/edgar/data/1065088/000119312515257121/d93601d8k.htm"
+    },
+    {
+      "date": "2015-11-02",
+      "parent": "HPQ",
+      "child": "HPE",
+      "shares": 1,
+      "child_raw_close": 14.49,
+      "cash_per_parent": 14.49,
+      "spin_ratio": 0.4883474576,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://investor.hp.com/news-events/news/news-details/2015/HP-Board-of-Directors-Approves-Separation/default.aspx"
+    },
+    {
+      "date": "2016-11-01",
+      "parent": "YUM",
+      "child": "YUMC",
+      "shares": 1,
+      "child_raw_close": 26.19,
+      "cash_per_parent": null,
+      "spin_ratio": null,
+      "upstream_factor_ratio": null,
+      "status": "outside_ranked_symbol_history",
+      "source": "https://www.sec.gov/Archives/edgar/data/1673358/000104746916016421/a2230169z8-k.htm"
+    },
+    {
+      "date": "2017-04-03",
+      "parent": "HPE",
+      "child": "DXC",
+      "shares": 0.085904,
+      "child_raw_close": 67.95,
+      "cash_per_parent": null,
+      "spin_ratio": null,
+      "upstream_factor_ratio": null,
+      "status": "outside_ranked_symbol_history",
+      "source": "https://www.sec.gov/Archives/edgar/data/23082/000119312517113607/d371672d8k.htm"
+    },
+    {
+      "date": "2019-02-26",
+      "parent": "GE",
+      "child": "WAB",
+      "shares": 0.005371,
+      "child_raw_close": 73.96,
+      "cash_per_parent": 0.39723916,
+      "spin_ratio": 0.9640742907,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://infomemo.theocc.com/infomemos?number=44621"
+    },
+    {
+      "date": "2019-04-02",
+      "parent": "DD",
+      "child": "DOW",
+      "shares": 0.3333333333,
+      "child_raw_close": 56.25,
+      "cash_per_parent": 18.75,
+      "spin_ratio": 0.6605720492,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://investors.dow.com/en/news/news-details/2019/Dow-completes-separation-from-DowDuPont/default.aspx"
+    },
+    {
+      "date": "2019-06-03",
+      "parent": "DD",
+      "child": "CTVA",
+      "shares": 1,
+      "child_raw_close": 24.81,
+      "cash_per_parent": 24.81,
+      "spin_ratio": 0.7541373501,
+      "upstream_factor_ratio": 0.7966666667,
+      "status": "applied",
+      "source": "https://www.sec.gov/Archives/edgar/data/1755672/000175567219000014/corteva-630201910xquse.htm"
+    },
+    {
+      "date": "2020-04-03",
+      "parent": "RTX",
+      "child": "CARR",
+      "shares": 1,
+      "child_raw_close": 16.92,
+      "cash_per_parent": 40.58,
+      "spin_ratio": 0.5516517512,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.sec.gov/Archives/edgar/data/101829/000114036120008397/nc10010681x2_8k.htm"
+    },
+    {
+      "date": "2020-04-03",
+      "parent": "RTX",
+      "child": "OTIS",
+      "shares": 0.5,
+      "child_raw_close": 47.32,
+      "cash_per_parent": 40.58,
+      "spin_ratio": 0.5516517512,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.sec.gov/Archives/edgar/data/101829/000114036120008397/nc10010681x2_8k.htm"
+    },
+    {
+      "date": "2020-11-17",
+      "parent": "PFE",
+      "child": "VTRS",
+      "shares": 0.1240788849,
+      "child_raw_close": 16.34,
+      "cash_per_parent": 2.0274489793,
+      "spin_ratio": 0.9467406135,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://infomemo.theocc.com/infomemos?number=47861"
+    },
+    {
+      "date": "2021-06-03",
+      "parent": "MRK",
+      "child": "OGN",
+      "shares": 0.1,
+      "child_raw_close": 37,
+      "cash_per_parent": 3.7,
+      "spin_ratio": 0.9523195876,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.merck.com/news/merck-announces-completion-of-organon-co-spinoff/"
+    },
+    {
+      "date": "2021-08-02",
+      "parent": "XPO",
+      "child": "GXO",
+      "shares": 1,
+      "child_raw_close": 63.07,
+      "cash_per_parent": null,
+      "spin_ratio": null,
+      "upstream_factor_ratio": null,
+      "status": "outside_ranked_symbol_history",
+      "source": "https://news.xpo.com/2667/xpo-logistics-spin-off-gxo-logistics-to-ring-nyse-opening-bell/"
+    },
+    {
+      "date": "2021-11-02",
+      "parent": "DELL",
+      "child": "VMW",
+      "shares": 0.440626,
+      "child_raw_close": 134.87,
+      "cash_per_parent": 59.42722862,
+      "spin_ratio": 0.4788787018,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://infomemo.theocc.com/infomemos?number=49493"
+    },
+    {
+      "date": "2021-11-04",
+      "parent": "IBM",
+      "child": "KD",
+      "shares": 0.2,
+      "child_raw_close": 26.38,
+      "cash_per_parent": 5.276,
+      "spin_ratio": 0.9581688153,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://newsroom.ibm.com/2021-11-03-IBM-Completes-the-Separation-of-Kyndryl"
+    },
+    {
+      "date": "2022-04-11",
+      "parent": "T",
+      "child": "WBD",
+      "shares": 0.241917,
+      "child_raw_close": 24.78,
+      "cash_per_parent": 5.99470326,
+      "spin_ratio": 0.7660576515,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://investors.att.com/stockholder-services/cost-basis-guide/worksheet/atandt-inc-wbd"
+    },
+    {
+      "date": "2022-08-22",
+      "parent": "AMC",
+      "child": "APE",
+      "shares": 1,
+      "child_raw_close": 6,
+      "cash_per_parent": 6,
+      "spin_ratio": 0.6354799514,
+      "upstream_factor_ratio": 0.5,
+      "status": "applied",
+      "source": "https://investor.amctheatres.com/sec-filings/all-sec-filings/content/0001104659-22-092397/0001104659-22-092397.pdf"
+    },
+    {
+      "date": "2022-11-01",
+      "parent": "XPO",
+      "child": "RXO",
+      "shares": 1,
+      "child_raw_close": null,
+      "cash_per_parent": null,
+      "spin_ratio": null,
+      "upstream_factor_ratio": null,
+      "status": "outside_ranked_symbol_history",
+      "source": "https://investors.xpo.com/news-releases/news-release-details/xpo-completes-spin-rxo"
+    },
+    {
+      "date": "2023-01-04",
+      "parent": "GE",
+      "child": "GEHC",
+      "shares": 0.3333333333,
+      "child_raw_close": 60.49,
+      "cash_per_parent": 20.1633333333,
+      "spin_ratio": 0.7768637722,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.ge.com/sites/default/files/ge-healthcare-distribution-ratio-faqs.pdf"
+    },
+    {
+      "date": "2023-08-23",
+      "parent": "AMC",
+      "child": "AMC",
+      "shares": 0.1333333333,
+      "child_raw_close": 1.96,
+      "cash_per_parent": 0.2613333333,
+      "spin_ratio": 0.8823529412,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://infomemo.theocc.com/infomemos?number=53048"
+    },
+    {
+      "date": "2024-04-01",
+      "parent": "MMM",
+      "child": "SOLV",
+      "shares": 0.25,
+      "child_raw_close": 69.1,
+      "cash_per_parent": 17.275,
+      "spin_ratio": 0.844781886,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://investors.3m.com/news-events/press-releases/detail/1835/3m-completes-spin-off-of-solventum"
+    },
+    {
+      "date": "2024-04-02",
+      "parent": "GE",
+      "child": "GEV",
+      "shares": 0.25,
+      "child_raw_close": 140,
+      "cash_per_parent": 35,
+      "spin_ratio": 0.7958826617,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.geaerospace.com/ko/node/5116"
+    },
+    {
+      "date": "2025-02-24",
+      "parent": "WDC",
+      "child": "SNDK",
+      "shares": 0.3333333333,
+      "child_raw_close": 48.6,
+      "cash_per_parent": 16.2,
+      "spin_ratio": 0.7516099356,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.sec.gov/Archives/edgar/data/106040/000010604025000012/wdc8-khardxspin.htm"
+    },
+    {
+      "date": "2025-10-30",
+      "parent": "HON",
+      "child": "SOLS",
+      "shares": 0.25,
+      "child_raw_close": null,
+      "cash_per_parent": null,
+      "spin_ratio": null,
+      "upstream_factor_ratio": null,
+      "status": "outside_ranked_symbol_history",
+      "source": "https://honeywell.gcs-web.com/news-releases/news-release-details/honeywell-completes-spin-solstice-advanced-materials"
+    },
+    {
+      "date": "2025-11-03",
+      "parent": "DD",
+      "child": "Q",
+      "shares": 0.5,
+      "child_raw_close": 97,
+      "cash_per_parent": 48.5,
+      "spin_ratio": 0.4169972352,
+      "upstream_factor_ratio": 0.4184100418,
+      "status": "applied",
+      "source": "https://www.investors.dupont.com/news-and-media/press-release-details/2025/DuPont-Completes-Separation-of-Qnity-Electronics/default.aspx"
+    },
+    {
+      "date": "2026-01-05",
+      "parent": "CMCSA",
+      "child": "VSNT",
+      "shares": 0.04,
+      "child_raw_close": 40.57,
+      "cash_per_parent": 1.6228,
+      "spin_ratio": 0.9454572343,
+      "upstream_factor_ratio": 1,
+      "status": "applied",
+      "source": "https://www.sec.gov/Archives/edgar/data/1166691/000095010326000079/dp239108_ex9901.htm"
+    },
+    {
+      "date": "2026-06-29",
+      "parent": "HON",
+      "child": "HONA",
+      "shares": 0.5,
+      "child_raw_close": null,
+      "cash_per_parent": null,
+      "spin_ratio": null,
+      "upstream_factor_ratio": null,
+      "status": "outside_ranked_symbol_history",
+      "source": "https://www.sec.gov/Archives/edgar/data/773840/000077384026000084/exhibit991-pressrelease629.htm"
+    }
+  ],
+  "watchlist_price_moves_above_50pct": [
+    {
+      "date": "2008-09-30T00:00:00.000",
+      "symbol": "CY@WIKI",
+      "rank": 26,
+      "move": -0.7325819672
+    },
+    {
+      "date": "2008-03-31T00:00:00.000",
+      "symbol": "MO",
+      "rank": 20,
+      "move": -0.6993092239
+    },
+    {
+      "date": "2008-09-15T00:00:00.000",
+      "symbol": "AIG",
+      "rank": 15,
+      "move": -0.607907743
+    },
+    {
+      "date": "2021-02-02T00:00:00.000",
+      "symbol": "GME",
+      "rank": 6,
+      "move": -0.6
+    },
+    {
+      "date": "2016-03-15T00:00:00.000",
+      "symbol": "BHC",
+      "rank": 16,
+      "move": -0.5146292005
+    },
+    {
+      "date": "2021-03-25T00:00:00.000",
+      "symbol": "GME",
+      "rank": 5,
+      "move": 0.5269237161
+    },
+    {
+      "date": "2021-01-29T00:00:00.000",
+      "symbol": "AMC",
+      "rank": 25,
+      "move": 0.5365005794
+    },
+    {
+      "date": "2008-11-24T00:00:00.000",
+      "symbol": "C",
+      "rank": 12,
+      "move": 0.5782493369
+    },
+    {
+      "date": "2021-01-29T00:00:00.000",
+      "symbol": "GME",
+      "rank": 8,
+      "move": 0.6787190083
+    },
+    {
+      "date": "2008-10-13T00:00:00.000",
+      "symbol": "MS",
+      "rank": 14,
+      "move": 0.8698347107
+    },
+    {
+      "date": "2021-01-26T00:00:00.000",
+      "symbol": "GME",
+      "rank": 18,
+      "move": 0.9270738377
+    },
+    {
+      "date": "2021-06-02T00:00:00.000",
+      "symbol": "AMC",
+      "rank": 7,
+      "move": 0.952247191
+    },
+    {
+      "date": "2021-02-24T00:00:00.000",
+      "symbol": "GME",
+      "rank": 5,
+      "move": 1.039359573
+    },
+    {
+      "date": "2021-01-27T00:00:00.000",
+      "symbol": "GME",
+      "rank": 11,
+      "move": 1.3483578862
+    }
+  ],
+  "attribution_examples": [
+    {
+      "year": 2024,
+      "top": 10,
+      "symbol": "TSLA",
+      "pnl_usd": -17600.3779416438,
+      "contribution_pct": -15.0657922994
+    },
+    {
+      "year": 2024,
+      "top": 20,
+      "symbol": "TSLA",
+      "pnl_usd": -3572.5866508904,
+      "contribution_pct": -14.7543498962
+    },
+    {
+      "year": 2022,
+      "top": 10,
+      "symbol": "NVDA",
+      "pnl_usd": -10202.6739076712,
+      "contribution_pct": -9.7105301966
+    },
+    {
+      "year": 2013,
+      "top": 10,
+      "symbol": "BAC",
+      "pnl_usd": -12517.8647179795,
+      "contribution_pct": -9.0403532597
+    },
+    {
+      "year": 2024,
+      "top": 30,
+      "symbol": "TSLA",
+      "pnl_usd": -1306.338705,
+      "contribution_pct": -8.4394250884
+    },
+    {
+      "year": 2024,
+      "top": 30,
+      "symbol": "MSTR",
+      "pnl_usd": -1181.8617332877,
+      "contribution_pct": -7.6352583941
+    },
+    {
+      "year": 2013,
+      "top": 20,
+      "symbol": "BAC",
+      "pnl_usd": -7342.4670278767,
+      "contribution_pct": -7.2310378305
+    },
+    {
+      "year": 2024,
+      "top": 10,
+      "symbol": "AMZN",
+      "pnl_usd": -8438.0051813699,
+      "contribution_pct": -7.2228695262
+    },
+    {
+      "year": 2013,
+      "top": 30,
+      "symbol": "BAC",
+      "pnl_usd": -3930.3166696233,
+      "contribution_pct": -6.9051088341
+    },
+    {
+      "year": 2013,
+      "top": 20,
+      "symbol": "AAPL",
+      "pnl_usd": -6941.6061883904,
+      "contribution_pct": -6.8362604506
+    },
+    {
+      "year": 2024,
+      "top": 20,
+      "symbol": "COIN",
+      "pnl_usd": -1640.3382906164,
+      "contribution_pct": -6.774398343
+    },
+    {
+      "year": 2022,
+      "top": 10,
+      "symbol": "AMD",
+      "pnl_usd": -6849.7575915753,
+      "contribution_pct": -6.5193476273
+    },
+    {
+      "year": 2013,
+      "top": 30,
+      "symbol": "AAPL",
+      "pnl_usd": -3601.7479981027,
+      "contribution_pct": -6.3278519291
+    },
+    {
+      "year": 2022,
+      "top": 30,
+      "symbol": "OXY",
+      "pnl_usd": -1058.441975,
+      "contribution_pct": -5.8493177215
+    },
+    {
+      "year": 2022,
+      "top": 30,
+      "symbol": "AMD",
+      "pnl_usd": -1009.9443604795,
+      "contribution_pct": -5.581303071
+    },
+    {
+      "year": 2013,
+      "top": 10,
+      "symbol": "MSFT",
+      "pnl_usd": -7271.8834462055,
+      "contribution_pct": -5.2517259691
+    },
+    {
+      "year": 2022,
+      "top": 20,
+      "symbol": "BABA",
+      "pnl_usd": -2426.5873073973,
+      "contribution_pct": -5.1584819723
+    },
+    {
+      "year": 2022,
+      "top": 20,
+      "symbol": "AMZN",
+      "pnl_usd": -1880.0024308219,
+      "contribution_pct": -3.9965422293
+    },
+    {
+      "year": 2022,
+      "top": 10,
+      "symbol": "AMZN",
+      "pnl_usd": -424.72052,
+      "contribution_pct": -0.4042333874
+    },
+    {
+      "year": 2013,
+      "top": 10,
+      "symbol": "AMZN",
+      "pnl_usd": -216.666,
+      "contribution_pct": -0.1564753433
+    },
+    {
+      "year": 2013,
+      "top": 20,
+      "symbol": "PFE",
+      "pnl_usd": 316.4267056849,
+      "contribution_pct": 0.3116246175
+    },
+    {
+      "year": 2013,
+      "top": 20,
+      "symbol": "CSCO",
+      "pnl_usd": 556.235825,
+      "contribution_pct": 0.5477943963
+    },
+    {
+      "year": 2013,
+      "top": 10,
+      "symbol": "TSLA",
+      "pnl_usd": 937.5456913562,
+      "contribution_pct": 0.6770918554
+    },
+    {
+      "year": 2013,
+      "top": 30,
+      "symbol": "PFE",
+      "pnl_usd": 707.5204727397,
+      "contribution_pct": 1.2430311034
+    },
+    {
+      "year": 2013,
+      "top": 30,
+      "symbol": "META",
+      "pnl_usd": 840.5391543356,
+      "contribution_pct": 1.4767294414
+    },
+    {
+      "year": 2022,
+      "top": 20,
+      "symbol": "MRNA",
+      "pnl_usd": 908.5896649315,
+      "contribution_pct": 1.9314958883
+    },
+    {
+      "year": 2022,
+      "top": 20,
+      "symbol": "RBLX",
+      "pnl_usd": 1813.8700869178,
+      "contribution_pct": 3.8559569297
+    },
+    {
+      "year": 2022,
+      "top": 30,
+      "symbol": "RBLX",
+      "pnl_usd": 1028.4557145205,
+      "contribution_pct": 5.6836032384
+    },
+    {
+      "year": 2022,
+      "top": 30,
+      "symbol": "SHOP",
+      "pnl_usd": 1788.2830245205,
+      "contribution_pct": 9.8826726769
+    },
+    {
+      "year": 2022,
+      "top": 10,
+      "symbol": "META",
+      "pnl_usd": 15996.5825688356,
+      "contribution_pct": 15.2249596021
+    },
+    {
+      "year": 2024,
+      "top": 20,
+      "symbol": "SMCI",
+      "pnl_usd": 4065.1827734247,
+      "contribution_pct": 16.7887121832
+    },
+    {
+      "year": 2024,
+      "top": 30,
+      "symbol": "SMCI",
+      "pnl_usd": 2859.6497746575,
+      "contribution_pct": 18.4743818428
+    },
+    {
+      "year": 2024,
+      "top": 20,
+      "symbol": "META",
+      "pnl_usd": 4496.7779947945,
+      "contribution_pct": 18.5711481412
+    },
+    {
+      "year": 2024,
+      "top": 10,
+      "symbol": "SMCI",
+      "pnl_usd": 28596.4977465753,
+      "contribution_pct": 24.4783888714
+    },
+    {
+      "year": 2024,
+      "top": 30,
+      "symbol": "NVDA",
+      "pnl_usd": 8995.6109831507,
+      "contribution_pct": 58.1149320049
+    },
+    {
+      "year": 2024,
+      "top": 10,
+      "symbol": "NVDA",
+      "pnl_usd": 76697.1292986987,
+      "contribution_pct": 65.6521708683
+    }
+  ]
+}
