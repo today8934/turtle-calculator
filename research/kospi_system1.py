@@ -24,7 +24,7 @@ OUT.mkdir(exist_ok=True)
 def market_data(years, first, end):
     indexes = [pd.read_csv(f"market/{y}.csv", parse_dates=["Date"]).set_index("Date")["Close"] for y in years]
     index = pd.concat(indexes).sort_index().loc[:end]
-    assert index.index.is_unique and index.at[END] == 4915.68
+    assert index.index.is_unique and index.index[-1] == end
     frames = []
     required = ["Code","Name","Date","Open","High","Low","Close","Volume","Amount","Changes"]
     for y in years:
@@ -32,8 +32,10 @@ def market_data(years, first, end):
         if "Date" not in d:
             d = d.reset_index()
         d = d.loc[d.Market.eq("KOSPI")].copy()
+        assert not d.empty, (y,"no KOSPI equities")
         d["Date"] = pd.to_datetime(d["Date"].astype(str), format="mixed")
         d["Code"] = d.Code.astype(str).str.zfill(6)
+        print("SOURCE_YEAR",y,len(d),d.Date.nunique(),int(d.Changes.isna().sum()),flush=True)
         frames.append(d[required])
     d = pd.concat(frames, ignore_index=True)
     del frames
@@ -520,15 +522,21 @@ def close_study(sizes):
     pd.DataFrame(results).to_csv(OUT/"summary.csv",index=False)
 
 
-def calendar_year_study(compare_exits=False):
+def calendar_year_study(compare_exits=False,first_year=2020,last_year=2026):
     sizes = (10,20,30)
-    index,quotes,ranks,names,_ = market_data(range(2018,END.year+1),pd.Timestamp("2019-12-30"),END)
-    years = range(2020,END.year+1)
-    annual_closes = {2019:2197.67,2020:2873.47,2021:2977.65,2022:2236.40,2023:2655.28,
+    years = range(first_year,last_year+1)
+    def final_session(year):
+        return pd.to_datetime(pd.read_csv(f"market/{year}.csv",usecols=["Date"]).Date).max()
+    end = END if last_year==END.year else final_session(last_year)
+    index,quotes,ranks,names,_ = market_data(range(first_year-2,last_year+1),final_session(first_year-1),end)
+    annual_closes = {2009:1682.77,2010:2051.00,2011:1825.74,2012:1997.05,2013:2011.34,
+                     2014:1915.59,2015:1961.31,2016:2026.46,2017:2467.49,2018:2041.04,
+                     2019:2197.67,2020:2873.47,2021:2977.65,2022:2236.40,2023:2655.28,
                      2024:2399.49,2025:4214.17,2026:4915.68}
-    for year, close in annual_closes.items():
+    for year in range(first_year-1,last_year+1):
+        close = annual_closes[year]
         assert np.isclose(index.loc[str(year)].iloc[-1],close), (year,index.loc[str(year)].iloc[-1],close)
-    traded_ranks = ranks.loc["2020":].le(max(sizes))
+    traded_ranks = ranks.loc[str(first_year):].le(max(sizes))
     order = ranks.columns[traded_ranks.any()].to_list()
     quote_subset = quotes.loc[quotes.Code.isin(order)]
     m, last, _ = panels(index,quote_subset,order)
@@ -542,7 +550,7 @@ def calendar_year_study(compare_exits=False):
         previous = index.index[days[0]-1]
         benchmark = (index.iloc[days[-1]]/index.at[previous]-1)*100
         # Risk and tie-breaker calculations only need preceding observations locally.
-        # Breakout history, including skipped and short shadow trades, is warmed up continuously since 2018.
+        # Breakout history is warmed up continuously from two years before the first test year.
         begin,stop = days[0]-65,days[-1]+1
         local_index = index.iloc[begin:stop]
         annual_ranks = ranks.iloc[days].loc[:,order]
@@ -561,7 +569,7 @@ def calendar_year_study(compare_exits=False):
             assert np.all(eligible[local_index.index>previous].sum(axis=1)==size)
             row = simulate(local_index,values,last[cols]-begin,codes,names,priority,eligible,("c","c"),events,
                            f"year{year}_top{size}",corr,closing_auction=True,start_date=previous)
-            if year==2020:
+            if year==2020 or first_year==2010:
                 label = row["label"]
                 profit = pd.read_csv(OUT/f"{label}_stock_profit.csv",dtype={"code":str}).set_index("code").profit_krw
                 trades = pd.read_csv(OUT/f"{label}_fills.csv",dtype={"code":str})
@@ -569,8 +577,7 @@ def calendar_year_study(compare_exits=False):
                     filled = trades.loc[trades.code.eq(code)]
                     official = quote_subset.loc[quote_subset.Code.eq(code),["Date","Close"]].set_index("Date").Close
                     assert np.allclose(official.loc[pd.to_datetime(filled.date)].to_numpy(),filled.raw_price,rtol=0,atol=.01)
-                    print("2020_ATTRIBUTION",size,code,names[code],round(won),
-                          filled[["date","action","raw_price","raw_shares"]].round(2).values.tolist(),flush=True)
+                    print("YEAR_ATTRIBUTION",year,size,code,names[code],round(won),flush=True)
             stats.append(dict(year=year,size=size,kospi_return=benchmark,sessions=len(days),
                               first=str(index.index[days[0]].date()),last=str(index.index[days[-1]].date()),**row))
             if compare_exits:
@@ -803,10 +810,14 @@ if __name__ == "__main__":
     parser.add_argument("--close-sizes", type=int, nargs="+", default=CLOSE_UNIVERSE_SIZES)
     parser.add_argument("--intraday", action="store_true")
     parser.add_argument("--calendar-years", action="store_true")
+    parser.add_argument("--calendar-range",nargs=2,type=int,metavar=("FIRST","LAST"),default=(2020,2026))
     parser.add_argument("--compare-exits", action="store_true")
     args = parser.parse_args()
     if args.calendar_years:
-        calendar_year_study(compare_exits=args.compare_exits)
+        first_year,last_year = args.calendar_range
+        if not 2010 <= first_year <= last_year <= END.year:
+            parser.error("calendar range must be within 2010 through 2026")
+        calendar_year_study(compare_exits=args.compare_exits,first_year=first_year,last_year=last_year)
     elif args.intraday:
         intraday_study()
     elif args.close_only:
