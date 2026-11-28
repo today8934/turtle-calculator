@@ -131,7 +131,7 @@ def executable(price, factor, up, old=False, etf=False):
 
 
 def panels(index, data, order, use_closes_for_channels=False, etf_codes=()):
-    fields = "o h l c factor n u20 d20 u55 d10 u10 touch_low10 touch_high10".split()
+    fields = "o h l c factor n u20 d20 u55 d55 d10 u10 touch_low10 touch_high10".split()
     mats = {k: np.full((len(index), len(order)), np.nan) for k in fields}
     etfs = pd.Index(order).isin(etf_codes)
     mats["etf"] = np.broadcast_to(etfs, mats["c"].shape)
@@ -163,7 +163,8 @@ def panels(index, data, order, use_closes_for_channels=False, etf_codes=()):
         pos = index.index.get_indexer(d.index)
         values = dict(o=o, h=h, l=l, c=c, factor=factor, n=n)
         for key, bounds, length, up in [("u20", h, 20, True), ("d20", l, 20, False),
-                                        ("u55", h, 55, True), ("d10", l, 10, False), ("u10", h, 10, True)]:
+                                        ("u55", h, 55, True), ("d55", l, 55, False),
+                                        ("d10", l, 10, False), ("u10", h, 10, True)]:
             if use_closes_for_channels:
                 bounds = c
             channel = bounds.rolling(length).max() if up else bounds.rolling(length).min()
