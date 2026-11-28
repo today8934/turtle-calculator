@@ -25,6 +25,9 @@ def assemble(dolt, early, dates, cache):
         # already use the successor's ticker on old rows; retain one actual bar.
         rule = """CASE WHEN symbol='UTX' AND date<DATE '2020-04-03' THEN 'RTX'
                         WHEN symbol='GOOG' AND date<DATE '2014-04-03' THEN 'GOOGL'
+                        WHEN symbol='DD' AND date<DATE '2017-09-01' THEN 'DD~2017'
+                        WHEN symbol='DOW' AND date<DATE '2017-09-01' THEN 'DD'
+                        WHEN symbol='DWDP' AND date<DATE '2019-06-03' THEN 'DD'
                         WHEN symbol='MOT' AND date<DATE '2011-01-04' THEN 'MSI'
                         WHEN symbol='KFT' AND date<DATE '2012-10-02' THEN 'MDLZ'"""
         if name == "older":
@@ -34,11 +37,11 @@ def assemble(dolt, early, dates, cache):
             CREATE TEMP VIEW {name} AS
             SELECT * EXCLUDE(key_symbol) REPLACE(key_symbol AS symbol) FROM (
                SELECT *, {rule} AS key_symbol FROM {name}_input
-               WHERE symbol IN ('UTX','RTX','KFT','MDLZ','DELL','DELL~2013','GOOG','GOOGL','MOT','MSI')
+               WHERE symbol IN ('UTX','RTX','KFT','MDLZ','DELL','DELL~2013','GOOG','GOOGL','MOT','MSI','DD','DWDP','DOW')
             ) AS canon QUALIFY row_number() OVER (PARTITION BY date,key_symbol
-                       ORDER BY (symbol IN ('UTX','KFT','DELL','GOOG','MOT')) DESC,symbol)=1
+                       ORDER BY (symbol IN ('UTX','KFT','DELL','GOOG','MOT','DOW','DWDP')) DESC,symbol)=1
             UNION ALL SELECT * FROM {name}_input
-            WHERE symbol NOT IN ('UTX','RTX','KFT','MDLZ','DELL','DELL~2013','GOOG','GOOGL','MOT','MSI')
+            WHERE symbol NOT IN ('UTX','RTX','KFT','MDLZ','DELL','DELL~2013','GOOG','GOOGL','MOT','MSI','DD','DWDP','DOW')
         """)
     # Both vendors supply split-only OHLC. Align the old adjusted basis across the
     # boundary so historical channel/ATR levels remain meaningful. Raw cash is unchanged.
