@@ -1,17 +1,45 @@
-name: US equity data checks
+name: US Turtle System 1 annual backtest
 on:
   push:
     branches: [research/us-system1-2010-2026]
+    paths:
+      - '.github/workflows/us-system1.yml'
+      - 'research/us_*.py'
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  probe:
+  annual:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 95
+    env:
+      PYTHONUNBUFFERED: '1'
+      OPENBLAS_NUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip -q install pandas pyarrow requests
-      - run: python -u research/us_equity_sources.py
+      - run: pip -q install pandas==2.2.3 numpy==2.2.6 pyarrow==20.0.0 requests duckdb==1.4.3 exchange-calendars==4.11.3
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/usdata/stocks
+          key: us-dolt-stocks-20261127-r1
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/usdata/wiki/quandl-wiki-prices-us-equites.zip
+          key: us-wiki-snapshot-v1
+      - name: Prepare early split-only OHLC and corporate actions
+        run: python research/us_early.py --cache /tmp/usdata/wiki --out /tmp/usdata/early.parquet
+      - name: Prepare listed US securities and historical corporate actions
+        run: python research/us_dolt.py /tmp/usdata/dolt.parquet --cache /tmp/usdata
+      - name: Rank and run 51 portfolios
+        run: python research/us_system1_run.py --dolt /tmp/usdata/dolt.parquet --early /tmp/usdata/early.parquet --out results-us
+      - uses: actions/upload-artifact@v4
+        with:
+          name: us-turtle-annual-2010-2026
+          path: |
+            results-us/*.csv
+            results-us/*.csv.gz
+            /tmp/usdata/dolt.metadata.json
+          retention-days: 60
