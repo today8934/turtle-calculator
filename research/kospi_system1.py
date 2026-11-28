@@ -275,6 +275,9 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
     peak = curve.equity.loc[:pit].idxmax()
     summary["peak_date"], summary["trough_date"] = str(curve.date.at[peak]), str(curve.date.at[pit])
     summary["peak_equity"], summary["trough_equity"] = round(curve.equity.at[peak]), round(curve.equity.at[pit])
+    if label == "base":
+        print("ATTRIBUTION", [(names[c], round(v)) for c,v in pd.concat(
+            [attribution.nlargest(3), attribution.nsmallest(3)]).items()], flush=True)
     print("RESULT", json.dumps(summary), flush=True)
     return summary
 
@@ -297,14 +300,18 @@ def main():
         if reverse == "near":
             run("near_extreme_first", primary, primary <= 100)
             run("near_extreme_first_4m", primary, primary <= 100, initial=4_000_000)
+            run("hindsight_near_first", primary, post)
         elif reverse:
             run("high_first", primary, primary <= 100)
             run("high_first_4m", primary, primary <= 100, initial=4_000_000)
+            run("hindsight_high_first", primary, post)
         else:
             run("base", primary, primary <= 100)
             run("prior_day_turnover", daily, daily <= 100)
             run("fixed_at_start", primary, pre)
+            run("fixed_at_start_4m", primary, pre, initial=4_000_000)
             run("full_period_top100_hindsight", primary, post)
+            run("hindsight_4m", primary, post, initial=4_000_000)
             run("no_four_name_cap", primary, primary <= 100, cap=100)
             run("gross", primary, primary <= 100, buy_fee=0., sell_fee=0.)
             run("capital_4m", primary, primary <= 100, initial=4_000_000)
