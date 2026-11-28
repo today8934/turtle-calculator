@@ -1,6 +1,8 @@
 """Cash-only Turtle System 1 study. Run from the repository root with market/{year}.{parquet,csv}."""
 import json
 import math
+import re
+from urllib.request import urlopen, Request
 from pathlib import Path
 
 import numpy as np
@@ -352,6 +354,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
 
 
 def main():
+    check_december_prices()
     index, data_, order, names, ranks, final = data()
     m, last, adj = panels(index, data_, order)
     ref = index.loc[START:]
@@ -370,6 +373,35 @@ def main():
             compare_entries()
     pd.DataFrame(results).to_csv(OUT / "summary.csv", index=False)
     explain_price_order(index, m, order)
+
+
+def check_december_prices():
+    day = pd.Timestamp("2025-12-19",tz="Asia/Seoul")
+    for code in ["005930", "005380"]:
+        try:
+            url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.KS"
+                   f"?interval=60m&period1={int(day.timestamp())}&period2={int((day+pd.Timedelta(days=1)).timestamp())}")
+            request = Request(url, headers={"User-Agent":"Mozilla/5.0"})
+            with urlopen(request,timeout=10) as response:
+                result = json.load(response)["chart"]["result"][0]
+            frame = pd.DataFrame(result["indicators"]["quote"][0],
+                                 index=pd.to_datetime(result["timestamp"],unit="s",utc=True).tz_convert("Asia/Seoul"))
+            frame.to_csv(OUT/f"dec19_hourly_{code}.csv")
+            print("HOURLY",code,frame.to_string().replace("\n"," | "),flush=True)
+        except (OSError,ValueError,KeyError,TypeError) as exc:
+            print("HOURLY unavailable",code,repr(exc),flush=True)
+        try:
+            url = f"https://finance.naver.com/item/sise_time.naver?code={code}&thistime=20251219153000&page=1"
+            with urlopen(Request(url,headers={"User-Agent":"Mozilla/5.0"}),timeout=8) as response:
+                html = response.read().decode("euc-kr",errors="replace")
+            rows = []
+            for tr in re.findall(r"<tr[^>]*>(.*?)</tr>",html,re.S|re.I):
+                cells = [re.sub(r"<.*?>","",c,flags=re.S).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>",tr,re.S|re.I)]
+                if cells and re.fullmatch(r"\d\d:\d\d",cells[0]):
+                    rows.append(cells[:2])
+            print("NAVER sample",code,rows[:3],flush=True)
+        except (OSError, ValueError) as exc:
+            print("NAVER unavailable",code,repr(exc),flush=True)
 
 
 def explain_price_order(index, m, order):
