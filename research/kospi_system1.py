@@ -9,7 +9,8 @@ import pandas as pd
 
 START = pd.Timestamp("2025-11-28")
 END = pd.Timestamp("2026-11-27")
-CAPITAL = 10_000_000
+CAPITAL = 100_000_000
+TOP = 30
 YEARS = range(2024, 2027)
 OUT = Path("output")
 OUT.mkdir(exist_ok=True)
@@ -43,18 +44,42 @@ def data():
     assert counts.loc[START:].min() >= 750 and not counts.loc[START:].isna().any(), counts.nsmallest(10)
     exposure = d.pivot(index="Date", columns="Code", values="Amount").reindex(index.index)
     listed = exposure.notna()
-    rolling = exposure.fillna(0).rolling(20).mean().where(listed).shift()
+    rolling = exposure.rolling(20, min_periods=20).mean().where(listed).shift()
     ranks = rolling.rank(axis=1, ascending=False, method="first")
-    ranks1 = exposure.rank(axis=1, ascending=False, method="first").shift()
-    fixed = ranks.loc[ranks.index > START].iloc[0].nsmallest(100).index.tolist()
-    final = exposure.loc[(exposure.index > START)].sum().nlargest(100).index.tolist()
-    members = set(fixed + final)
-    for rank in [ranks, ranks1]:
-        members.update(rank.columns[rank.loc[rank.index > START].le(100).any()])
-    d = d.loc[d.Code.isin(members)]
-    order = sorted(members)
     names = d.groupby("Code").Name.last().to_dict()
-    return index, d, order, names, ranks[order], ranks1[order], set(fixed), set(final)
+    year = exposure.loc[exposure.index > START].sum().sort_values(ascending=False)
+    test = ranks.loc[ranks.index > START]
+    for size in (TOP, 100):
+        annual = year.head(size).index
+        daily = test.le(size)
+        common = daily[annual].sum(axis=1)
+        assert daily.sum(axis=1).eq(size).all() and len(common) == 243
+        uses = daily.sum()
+        stats = dict(size=size, days=len(common), mean=common.mean(), median=common.median(),
+                     min=int(common.min()), max=int(common.max()), first=int(common.iloc[0]), last=int(common.iloc[-1]),
+                     min_date=str(common.idxmin().date()), max_date=str(common.idxmax().date()),
+                     distinct=int((uses > 0).sum()), ever_annual=int((uses[annual]>0).sum()),
+                     always=int(uses[annual].eq(len(common)).sum()),
+                     at_least_25=int(common.ge(25).sum()), top10_avg=float(daily[annual[:10]].sum(axis=1).mean()),
+                     last10_avg=float(daily[annual[-10:]].sum(axis=1).mean()))
+        print("OVERLAP", json.dumps(stats), flush=True)
+        if size == TOP:
+            detail = pd.DataFrame({"annual_rank":year.rank(ascending=False, method="first").astype(int),
+                                   "annual_krw":year, "days_in_rolling_top30":uses})
+            detail["name"] = detail.index.map(names)
+            detail.loc[detail.days_in_rolling_top30.gt(0) | detail.annual_rank.le(TOP)].to_csv(OUT/"top30_members.csv")
+            print("CORE", [(names[c], int(uses[c])) for c in annual[:10]], flush=True)
+            print("MARGINAL", [(names[c], int(uses[c])) for c in uses[annual].nsmallest(5).index], flush=True)
+            print("OUTSIDERS", [(names[c], int(uses[c])) for c in uses.drop(annual).nlargest(5).index], flush=True)
+            first_date = common.idxmin()
+            selected = set(daily.columns[daily.loc[first_date]])
+            print("MIN_EXAMPLES", sorted(names[c] for c in set(annual)-selected), sorted(names[c] for c in selected-set(annual)), flush=True)
+            overlap = pd.DataFrame({"common":common, "different_slots":size-common})
+            overlap["rolling_codes"] = daily.apply(lambda row: " ".join(row.index[row]), axis=1)
+            overlap.to_csv(OUT/"top30_overlap_by_date.csv")
+    final = set(year.head(TOP).index)
+    order = sorted(set(test.columns[test.le(TOP).any()]).union(final))
+    return index, d.loc[d.Code.isin(order)], order, names, ranks[order], final
 
 
 def ticks(price):
@@ -169,9 +194,37 @@ def breakout_events(m, reverse):
     return phases, events
 
 
-def simulate(index, m, last, order, names, priority, eligible, phases, events, label,
-             initial=CAPITAL, cap=4, buy_fee=.0005, sell_fee=.0025, partial=False):
+def correlation_limits(index, m):
+    closes = pd.DataFrame(m["c"], index=index.index)
+    returns = closes.pct_change(fill_method=None)
+    # No later price enters either the tie-breaker or the correlation estimate.
+    strength = (closes.shift(1) - closes.shift(64)) / m["n"]
+    priority = -strength.fillna(-1e30).to_numpy()
+    all_corr = {}
+    for i in range(index.index.get_loc(START)+1, len(index)):
+        corr = returns.iloc[i-60:i].corr(min_periods=40).fillna(1.).to_numpy()
+        np.fill_diagonal(corr, 1.)
+        all_corr[i] = corr
+    return priority, all_corr
+
+
+def room(k, pos, corr):
+    # Check the candidate and all held names as group anchors. A sector is not required.
+    active = sorted(set(pos) | {k})
+    units = np.array([len(pos[s]["lots"]) if s in pos else 0 for s in active])
+    units[active.index(k)] += 1
+    if units.sum() > 12 or units[active.index(k)] > 4:
+        return False
+    pairs = corr[np.ix_(active, active)]
+    return bool(((pairs >= .70) @ units <= 6).all() and ((pairs >= .40) @ units <= 10).all())
+
+
+def simulate(index, m, last, order, names, priority, eligible, phases, events, label, correlations,
+             buy_fee=.0005, sell_fee=.0025):
+    initial = CAPITAL
     cash = equity = float(initial)
+    annual_base = notional = float(initial)
+    next_cut = annual_base * .90
     pos, marks, ledger, curve = {}, {}, [], []
     history = index.index
     start = history.get_loc(START)
@@ -181,7 +234,15 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                        price / fac if fac else 0, qty * fac if fac else qty, cause, cash])
 
     for i in range(start + 1, len(index)):
-        opening_equity = equity
+        if history[i].year != history[i-1].year:
+            annual_base = notional = equity
+            next_cut = annual_base * .90
+        if equity >= annual_base:
+            notional = annual_base
+            next_cut = annual_base * .90
+        while equity <= next_cut and notional >= 1:
+            notional *= .8
+            next_cut -= notional * .10
         eligible_today = eligible[i]
         for k in list(pos):
             if last[k] < i:
@@ -216,12 +277,11 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                         del pos[k]
                         hold = None
                 price = events[i, stage, k]
-                units_in_account = sum(len(p["lots"]) for p in pos.values())
-                if hold is None and rising and eligible_today[k] and np.isfinite(price) and len(pos) < cap and units_in_account < 12:
+                if hold is None and rising and eligible_today[k] and np.isfinite(price) and room(k, pos, correlations[i]):
                     n = m["n"][i,k]
-                    desired = math.floor(opening_equity * .01 / (n / fac))
+                    desired = math.floor(notional * .01 / (n / fac))
                     shares = min(desired, math.floor(cash / (price / fac * (1 + buy_fee))))
-                    if shares > 0 and (partial or shares == desired):
+                    if shares > 0 and shares == desired:
                         qty = shares / fac
                         cash -= qty * price * (1 + buy_fee)
                         hold = dict(qty=qty, units=1, unit=qty, n=n, latest=price,
@@ -230,14 +290,14 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                         record(k, "buy", price, qty, "entry")
                 if hold is None or not rising:
                     continue
-                while hold["units"] < 4 and sum(len(p["lots"]) for p in pos.values()) < 12:
+                while hold["units"] < 4:
                     level = executable(hold["latest"] + .5*hold["n"], fac, True)
-                    if target < level:
+                    if target < level or not room(k, pos, correlations[i]):
                         break
                     px = target if gap else max(previous, level)
                     desired = math.floor(hold["unit"]*fac + 1e-8)
                     shares = min(desired, math.floor(cash / (px / fac * (1 + buy_fee))))
-                    if shares < 1 or (not partial and shares < desired):
+                    if shares < 1 or shares < desired:
                         break
                     qty = shares / fac
                     cash -= qty * px * (1 + buy_fee)
@@ -251,7 +311,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
             if np.isfinite(m["c"][i,k]):
                 marks[k] = m["c"][i,k]
         equity = cash + sum(p["qty"] * marks[k] for k,p in pos.items())
-        assert cash > -1e-4 and equity >= 0 and len(pos) <= cap
+        assert cash > -1e-4 and equity >= 0 and sum(len(p["lots"]) for p in pos.values()) <= 12
         curve.append([history[i].date(), equity, cash, len(pos), index.iloc[i]])
     curve = pd.DataFrame(curve, columns=["date","equity","cash","holdings","index"])
     trades = pd.DataFrame(ledger, columns=["date","phase","code","name","action","raw_price","raw_shares","reason","cash_after"])
@@ -270,7 +330,8 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                    exits=int(trades.reason.eq("entry").sum())-len(pos), held=len(pos),
                    delist=int(trades.reason.eq("delisting_zero_recovery").sum()),
                    exposure=round((1 - curve.cash.iloc[1:]/curve.equity.iloc[1:]).mean()*100, 2),
-                   candidates=int(eligible[start + 1:].any(axis=0).sum()))
+                   candidates=int(eligible[start + 1:].any(axis=0).sum()), traded=int(trades.code.nunique()),
+                   max_names=int(curve.holdings.max()))
     pit = (curve.equity / curve.equity.cummax()).idxmin()
     peak = curve.equity.loc[:pit].idxmax()
     summary["peak_date"], summary["trough_date"] = str(curve.date.at[peak]), str(curve.date.at[pit])
@@ -283,40 +344,34 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
 
 
 def main():
-    index, data_, order, names, ranks, ranks1, first, final = data()
+    index, data_, order, names, ranks, final = data()
     m, last, adj = panels(index, data_, order)
     ref = index.loc[START:]
     print("BENCH", len(ref)-1, ref.iloc[0], ref.iloc[-1], (ref.iloc[-1]/ref.iloc[0]-1)*100,
           (ref/ref.cummax()-1).min()*100, "source adjustments", adj, flush=True)
-    primary = ranks.fillna(1e9).to_numpy()
-    daily = ranks1.fillna(1e9).to_numpy()
-    pre = np.broadcast_to([c in first for c in order], primary.shape)
-    post = np.broadcast_to([c in final for c in order], primary.shape)
+    priority, correlations = correlation_limits(index, m)
+    rolling = ranks.le(TOP).to_numpy()
+    post = np.broadcast_to([c in final for c in order], rolling.shape)
     results = []
-    for reverse in [False, True, "near"]:
+    for reverse, tag in [(False,"low_first"),(True,"high_first"),("near","near_first")]:
         path, events = breakout_events(m, reverse)
-        def run(name, priority, eligible, **kw):
-            results.append(simulate(index,m,last,order,names,priority,eligible,path,events,name,**kw))
-        if reverse == "near":
-            run("near_extreme_first", primary, primary <= 100)
-            run("near_extreme_first_4m", primary, primary <= 100, initial=4_000_000)
-            run("hindsight_near_first", primary, post)
-        elif reverse:
-            run("high_first", primary, primary <= 100)
-            run("high_first_4m", primary, primary <= 100, initial=4_000_000)
-            run("hindsight_high_first", primary, post)
-        else:
-            run("base", primary, primary <= 100)
-            run("prior_day_turnover", daily, daily <= 100)
-            run("fixed_at_start", primary, pre)
-            run("fixed_at_start_4m", primary, pre, initial=4_000_000)
-            run("full_period_top100_hindsight", primary, post)
-            run("hindsight_4m", primary, post, initial=4_000_000)
-            run("no_four_name_cap", primary, primary <= 100, cap=100)
-            run("gross", primary, primary <= 100, buy_fee=0., sell_fee=0.)
-            run("capital_4m", primary, primary <= 100, initial=4_000_000)
-            run("allow_partial_units", primary, primary <= 100, partial=True)
+        for name, eligible in [("rolling",rolling),("annual",post)]:
+            results.append(simulate(index,m,last,order,names,priority,eligible,path,events,
+                                    f"{name}_{tag}",correlations))
+        if tag == "low_first":
+            compare_entries()
     pd.DataFrame(results).to_csv(OUT / "summary.csv", index=False)
+
+
+def compare_entries():
+    calendars = {}
+    for mode in ["rolling", "annual"]:
+        label = f"{mode}_low_first"
+        trades = pd.read_csv(OUT / f"{label}_fills.csv",dtype={"code":str})
+        trades = trades.loc[trades.reason.eq("entry")]
+        calendars[mode] = set(zip(trades.date, trades.code))
+    common = calendars["rolling"] & calendars["annual"]
+    print("SAME_ENTRY", len(common), len(calendars["rolling"]), len(calendars["annual"]), flush=True)
 
 
 if __name__ == "__main__":
