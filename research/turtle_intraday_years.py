@@ -19,6 +19,7 @@ PRE_2013_FINANCIALS = {
     "086790", "088350", "105560",
 }
 OUT = Path("output")
+MERGER_RECALL = {pd.Timestamp("2015-08-26"): {"000830"}}
 
 
 def short_mask(dates, codes):
@@ -32,7 +33,7 @@ def verify_fills(label, raw, start, dates, codes, restrict, two_sided):
     daily = pd.read_csv(OUT / f"{label}_daily.csv", parse_dates=["date"])
     assert daily.date.is_monotonic_increasing and daily.equity.iloc[0] == 100_000_000
     if len(fills) == 0:
-        return 0
+        return dict(one_price_directional_fills=0, fees_pct=0, completed=0, losing=0, closed_same_day=0)
     assert fills.date.gt(start).all() and fills.raw_shares.gt(0).all()
     order = pd.MultiIndex.from_frame(fills[["date","phase","fraction"]])
     assert order.is_monotonic_increasing, label
@@ -46,13 +47,36 @@ def verify_fills(label, raw, start, dates, codes, restrict, two_sided):
     if two_sided:
         shorts = ordinary.loc[ordinary.side.eq(-1) & ordinary.reason.isin(["entry","add"])]
         assert restrict[dates.get_indexer(shorts.date),pd.Index(codes).get_indexer(shorts.code)].all()
+        recalled = ordinary[ordinary.reason.eq("merger_recall")]
+        if len(recalled):
+            assert recalled.date.eq("2015-08-26").all() and recalled.code.eq("000830").all()
+            np.testing.assert_allclose(recalled.raw_price,48100,atol=.0001,rtol=0)
     cash_field = "cash_book_after" if two_sided else "cash_after"
     cashflow = (fills.raw_price * fills.raw_shares * np.where(fills.action.eq("buy"), -1.0005, .9975))
     np.testing.assert_allclose(1e8+cashflow.cumsum(), fills[cash_field], atol=.02, rtol=0)
     buying = ordinary.action.eq("buy").to_numpy()
     moved = bars.Changes.to_numpy()
     locked = bars.High.eq(bars.Low).to_numpy() & ((buying & (moved>0)) | (~buying & (moved<0)))
-    return int(locked.sum())
+    fee = fills.raw_price * fills.raw_shares * np.where(fills.action.eq("buy"),.0005,.0025)
+    assert ordinary.shape[0] == fills.shape[0], "Unresolved delisted holding"
+    campaigns = {}
+    completed = losing = same_day = 0
+    for record,flow in zip(fills.itertuples(),cashflow):
+        if record.reason == "entry":
+            assert record.code not in campaigns
+            campaigns[record.code] = [0, 0., record.date]
+        c = campaigns[record.code]
+        c[0] += 1 if record.reason in ("entry","add") else -1
+        c[1] += flow
+        if record.reason == "merger_recall":
+            c[0] = 0
+        if c[0] == 0:
+            completed += 1
+            losing += c[1] < 0
+            same_day += c[2] == record.date
+            del campaigns[record.code]
+    return dict(one_price_directional_fills=int(locked.sum()), fees_pct=fee.sum()/1e6,
+                completed=completed, losing=losing, closed_same_day=same_day)
 
 
 def run(path):
@@ -94,8 +118,9 @@ def run(path):
                 if strategy == "long":
                     row = simulate_path(*args,events[0],label,corr,previous)
                 else:
-                    row = simulate_two_sided(*args,events,label,corr,previous,short_eligible=restrict)
-                row["one_price_directional_fills"] = verify_fills(label,raw,previous,local.index,codes,restrict,strategy=="long_short")
+                    row = simulate_two_sided(*args,events,label,corr,previous,short_eligible=restrict,
+                                             scheduled_recall=MERGER_RECALL)
+                row.update(verify_fills(label,raw,previous,local.index,codes,restrict,strategy=="long_short"))
                 stats.append(dict(year=year,size=size,path=path,strategy=strategy,kospi=benchmark,**row))
         print("FINISHED_YEAR",year,path,flush=True)
     result = pd.DataFrame(stats)
@@ -110,7 +135,9 @@ def combine():
     assert results.groupby("year").kospi.nunique().eq(1).all()
     results.to_csv(OUT/"intraday_comparison.csv",index=False)
     for (strategy,path), g in results.groupby(["strategy","path"]):
-        print("SCENARIO_DATA",strategy,path,g[["year","size","ret","mdd","kospi","fills","delist","one_price_directional_fills"]].round(4).to_json(orient="values"))
+        keys = ["year","size","ret","mdd","kospi","fills","delist","one_price_directional_fills",
+                "fees_pct","completed","losing","closed_same_day","merger_recalls"]
+        print("SCENARIO_DATA",strategy,path,g[keys].round(4).to_json(orient="values"))
 
 
 if __name__ == "__main__":

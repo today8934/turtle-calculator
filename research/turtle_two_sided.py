@@ -9,12 +9,14 @@ from kospi_system1 import CAPITAL, OUT, TICK_REFORM, executable, room
 
 
 def simulate_two_sided(index, m, last, order, names, priority, eligible, phases, events,
-                       label, correlations, start_date, short_eligible=None):
+                       label, correlations, start_date, short_eligible=None, scheduled_recall=None):
     """Apply coupled OHLC paths. Cash book contains locked short proceeds.
 
     Spendable collateral = equity minus total marked absolute exposure. Existing
     positions can drift above 100% exposure, but new risk is then rejected.
     The alternative short mask restricts opening or adding to short positions.
+    Pre-announced corporate-action recalls close shorts at that session's
+    closing price, after all other orders. Unknown delistings fail the run.
     """
     start = index.index.get_loc(start_date)
     cash_book = equity = risk_base = float(CAPITAL)
@@ -27,6 +29,7 @@ def simulate_two_sided(index, m, last, order, names, priority, eligible, phases,
     daily.append((index.index[start], equity, cash_book, equity, 0, 0, 0))
     stopped_by_short_restriction = 0
     shorts_max_deficit = 0.0
+    recalls = {pd.Timestamp(day): set(codes) for day,codes in (scheduled_recall or {}).items()}
     serial = 0
     for i in range(start + 1, len(index)):
         date = index.index[i]
@@ -55,8 +58,7 @@ def simulate_two_sided(index, m, last, order, names, priority, eligible, phases,
 
         for k in list(holdings):
             if last[k] < i:
-                pos = holdings.pop(k)
-                account_fill(k, pos["side"], False, pos["qty"], 0, "delist", 0, -1)
+                raise ValueError(f"{label}: no corporate-action settlement for {order[k]} at {date}")
         pending = {}
         for stage, field in enumerate(phases):
             end = m[field][i]
@@ -190,6 +192,13 @@ def simulate_two_sided(index, m, last, order, names, priority, eligible, phases,
                 if not np.isfinite(end[k]) or side*(end[k]-level) < -1e-7:
                     del pending[key]
 
+        for k in list(holdings):
+            if holdings[k]["side"] == -1 and order[k] in recalls.get(date, ()):
+                close = m["c"][i,k]
+                if not np.isfinite(close) or close <= 0:
+                    raise ValueError(f"{label}: missing recall closing print for {order[k]} at {date}")
+                pos = holdings.pop(k)
+                account_fill(k,-1,False,pos["qty"],close,"merger_recall",1.,len(phases)-1)
         for k in holdings:
             if np.isfinite(m["c"][i,k]):
                 last_marks[k] = m["c"][i,k]
@@ -220,4 +229,5 @@ def simulate_two_sided(index, m, last, order, names, priority, eligible, phases,
                 delist=int(trades.reason.eq("delist").sum()),long_entries=int((entries & trades.side.eq(1)).sum()),
                 short_entries=int((entries & trades.side.eq(-1)).sum()),long_pnl=round(long_pnl),
                 short_pnl=round(short_pnl),min_free_collateral=round(shorts_max_deficit),
+                merger_recalls=int(trades.reason.eq("merger_recall").sum()),
                 short_orders_restricted=stopped_by_short_restriction)
