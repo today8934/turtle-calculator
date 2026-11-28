@@ -21,37 +21,44 @@ OUT = Path("output")
 OUT.mkdir(exist_ok=True)
 
 
-def data(max_size=TOP):
-    indexes = [pd.read_csv(f"market/{y}.csv", parse_dates=["Date"]).set_index("Date")["Close"] for y in YEARS]
-    index = pd.concat(indexes).sort_index().loc[:END]
-    assert index.index.is_unique and index.at[START] == 3926.59 and index.at[END] == 4915.68
+def market_data(years, first, end):
+    indexes = [pd.read_csv(f"market/{y}.csv", parse_dates=["Date"]).set_index("Date")["Close"] for y in years]
+    index = pd.concat(indexes).sort_index().loc[:end]
+    assert index.index.is_unique and index.at[END] == 4915.68
     frames = []
-    for y in YEARS:
+    required = ["Code","Name","Date","Open","High","Low","Close","Volume","Amount","Changes"]
+    for y in years:
         d = pd.read_parquet(f"market/{y}.parquet")
         if "Date" not in d:
             d = d.reset_index()
         d = d.loc[d.Market.eq("KOSPI")].copy()
         d["Date"] = pd.to_datetime(d["Date"].astype(str), format="mixed")
         d["Code"] = d.Code.astype(str).str.zfill(6)
-        frames.append(d)
+        frames.append(d[required])
     d = pd.concat(frames, ignore_index=True)
-    for day in index.loc[START:].index.difference(pd.DatetimeIndex(d.Date.unique())):
+    del frames
+    for day in index.loc[first:].index.difference(pd.DatetimeIndex(d.Date.unique())):
         snapshot = ("https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/"
                     "259713bf397e5e28fb0da531a19b78a3ca15766b/data/listing/krx/"
                     f"{day.date()}.csv")
         daily = pd.read_csv(snapshot, dtype={"Code":str}).rename(columns={"ChagesRatio":"ChangesRatio"})
         daily = daily.loc[daily.Market.eq("KOSPI")].assign(Date=day)
         print("Supplemented KRX snapshot", day.date(), len(daily), flush=True)
-        d = pd.concat([d, daily], ignore_index=True)
+        d = pd.concat([d, daily[required]], ignore_index=True)
     d = d.loc[d.Date.isin(index.index)].sort_values(["Code", "Date"])
     assert not d.duplicated(["Code", "Date"]).any()
     counts = d.groupby("Date").size().reindex(index.index)
-    assert counts.loc[START:].min() >= 750 and not counts.loc[START:].isna().any(), counts.nsmallest(10)
+    assert counts.loc[first:].min() >= 750 and not counts.loc[first:].isna().any(), counts.nsmallest(10)
     exposure = d.pivot(index="Date", columns="Code", values="Amount").reindex(index.index)
     listed = exposure.notna()
     rolling = exposure.rolling(20, min_periods=20).mean().where(listed).shift()
     ranks = rolling.rank(axis=1, ascending=False, method="first")
     names = d.groupby("Code").Name.last().to_dict()
+    return index,d,ranks,names,exposure
+
+
+def data(max_size=TOP):
+    index,d,ranks,names,exposure = market_data(YEARS,START,END)
     year = exposure.loc[exposure.index > START].sum().sort_values(ascending=False)
     test = ranks.loc[ranks.index > START]
     for size in (TOP, 100):
@@ -87,22 +94,30 @@ def data(max_size=TOP):
     return index, d.loc[d.Code.isin(order)], order, names, ranks[order], final
 
 
-def ticks(price):
-    return np.select([price < 2000, price < 5000, price < 20000, price < 50000, price < 200000, price < 500000],
-                     [1, 5, 10, 50, 100, 500], default=1000)
+TICK_REFORM = pd.Timestamp("2023-01-25")
+
+
+def ticks(price, old=False):
+    modern = np.select([price < 2000, price < 5000, price < 20000, price < 50000, price < 200000, price < 500000],
+                       [1, 5, 10, 50, 100, 500], default=1000)
+    if not np.any(old):
+        return modern
+    original = np.select([price < 1000, price < 5000, price < 10000, price < 50000, price < 100000, price < 500000],
+                         [1, 5, 10, 50, 100, 500], default=1000)
+    return np.where(old,original,modern)
 
 
 def trigger(adjusted, factor, up):
     raw = adjusted / factor
     # A strict downward break at an exact tick-band boundary uses the lower band's increment.
-    tick = ticks(raw + (1e-7 if up else -1e-7))
+    tick = ticks(raw + (1e-7 if up else -1e-7), factor.index < TICK_REFORM)
     units = raw / tick
     return ((np.floor(units + 1e-9) + 1 if up else np.ceil(units - 1e-9) - 1) * tick) * factor
 
 
-def executable(price, factor, up):
+def executable(price, factor, up, old=False):
     raw = price / factor
-    tick = float(ticks(raw + (1e-7 if up else -1e-7)))
+    tick = float(ticks(raw + (1e-7 if up else -1e-7), old))
     units = raw / tick
     return (math.ceil(units - 1e-9) if up else math.floor(units + 1e-9)) * tick * factor
 
@@ -205,14 +220,14 @@ def breakout_events(m, reverse, phases=None, open_stages=(0,)):
     return phases, events
 
 
-def correlation_limits(index, m):
+def correlation_limits(index, m, start_date=START):
     closes = pd.DataFrame(m["c"], index=index.index)
     returns = closes.pct_change(fill_method=None)
     # No later price enters either the tie-breaker or the correlation estimate.
     strength = (closes.shift(1) - closes.shift(64)) / m["n"]
     priority = -strength.fillna(-1e30).to_numpy()
     all_corr = {}
-    for i in range(index.index.get_loc(START)+1, len(index)):
+    for i in range(index.index.get_loc(start_date)+1, len(index)):
         corr = returns.iloc[i-60:i].corr(min_periods=40).fillna(1.).to_numpy()
         np.fill_diagonal(corr, 1.)
         all_corr[i] = corr
@@ -232,15 +247,15 @@ def room(k, pos, corr):
 
 def simulate(index, m, last, order, names, priority, eligible, phases, events, label, correlations,
              buy_fee=.0005, sell_fee=.0025, retry=False, align_dec19=None, closing_auction=False,
-             open_stages=(0,)):
+             open_stages=(0,), start_date=START):
     initial = CAPITAL
     cash = equity = float(initial)
     annual_base = notional = float(initial)
     next_cut = annual_base * .90
     pos, marks, ledger, curve = {}, {}, [], []
     history = index.index
-    start = history.get_loc(START)
-    curve.append([START.date(), equity, cash, 0, index.at[START]])
+    start = history.get_loc(start_date)
+    curve.append([start_date.date(), equity, cash, 0, index.at[start_date]])
     def record(k, action, price, qty, cause):
         ledger.append([history[i].date(), stage, order[k], names[order[k]], action,
                        price / fac if fac else 0, qty * fac if fac else qty, cause, cash])
@@ -252,16 +267,17 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
             held = dict(qty=0.,units=0,unit=qty,n=n,latest=fill,lots=[])
             pos[k] = held
         else:
-            held["lots"] = [(executable(s + .5*n, fac, False), q) for s,q in held["lots"]]
+            held["lots"] = [(executable(s + .5*n, fac, False, old_tick), q) for s,q in held["lots"]]
         held["qty"] += qty
         held["units"] += 1
         held["latest"] = fill
-        held["lots"].append((executable(fill - 2*n, fac, False), qty))
+        held["lots"].append((executable(fill - 2*n, fac, False, old_tick), qty))
         record(k, "buy", fill, qty, "entry" if held["units"]==1 else "add")
         waiting.pop(k, None)
         return held
 
     for i in range(start + 1, len(index)):
+        old_tick = history[i] < TICK_REFORM
         waiting = {}
         sales = 0
         if history[i].year != history[i-1].year:
@@ -337,7 +353,7 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                 while hold["units"] < 4:
                     if align_today and order[k] == "005930":
                         break
-                    level = executable(hold["latest"] + .5*hold["n"], fac, True)
+                    level = executable(hold["latest"] + .5*hold["n"], fac, True, old_tick)
                     if target < level or not room(k, pos, correlations[i]):
                         break
                     px = target if gap else max(previous, level)
@@ -415,9 +431,10 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
     return summary
 
 
-def close_signals(m):
+def close_signals(m, calendar=None):
     """At each closing print, finish the shadow trade before checking for a fresh breakout."""
     dates, codes = m["c"].shape
+    old_tick = np.zeros(dates,dtype=bool) if calendar is None else calendar < TICK_REFORM
     events = np.full((dates, 2, codes), np.nan)
     for k in range(codes):
         side, previous_won, waiting_for_55 = 0, False, False
@@ -432,12 +449,12 @@ def close_signals(m):
                 side, waiting_for_55 = 0, False
             if side == 0:
                 if c >= m["u20"][i,k]:
-                    side, fill, stop = 1, c, executable(c - 2*n,f,False)
+                    side, fill, stop = 1, c, executable(c - 2*n,f,False,old_tick[i])
                     waiting_for_55 = previous_won
                     if not previous_won:
                         events[i,1,k] = c
                 elif c <= m["d20"][i,k]:
-                    side, fill, stop = -1, c, executable(c + 2*n,f,True)
+                    side, fill, stop = -1, c, executable(c + 2*n,f,True,old_tick[i])
             if side == 1 and waiting_for_55 and c >= m["u55"][i,k]:
                 events[i,1,k] = c
                 waiting_for_55 = False
@@ -468,6 +485,50 @@ def close_study(sizes):
                     print("TOP_CONTRIBUTORS", size,
                           [(names[c],round(v)) for c,v in gains.nlargest(3).items()],flush=True)
     pd.DataFrame(results).to_csv(OUT/"summary.csv",index=False)
+
+
+def calendar_year_study():
+    sizes = (10,20,30)
+    index,quotes,ranks,names,_ = market_data(range(2018,END.year+1),pd.Timestamp("2019-12-30"),END)
+    years = range(2020,END.year+1)
+    annual_closes = {2019:2197.67,2020:2873.47,2021:2977.65,2022:2236.40,2023:2655.28,
+                     2024:2399.49,2025:4214.17,2026:4915.68}
+    for year, close in annual_closes.items():
+        assert np.isclose(index.loc[str(year)].iloc[-1],close), (year,index.loc[str(year)].iloc[-1],close)
+    traded_ranks = ranks.loc["2020":].le(max(sizes))
+    order = ranks.columns[traded_ranks.any()].to_list()
+    quote_subset = quotes.loc[quotes.Code.isin(order)]
+    m, last, _ = panels(index,quote_subset,order)
+    signals = close_signals(m,index.index)
+    stats = []
+    for year in years:
+        days = np.flatnonzero(index.index.year==year)
+        previous = index.index[days[0]-1]
+        benchmark = (index.iloc[days[-1]]/index.at[previous]-1)*100
+        # Risk and tie-breaker calculations only need preceding observations locally.
+        # Breakout history, including skipped and short shadow trades, is warmed up continuously since 2018.
+        begin,stop = days[0]-65,days[-1]+1
+        local_index = index.iloc[begin:stop]
+        annual_ranks = ranks.iloc[days].loc[:,order]
+        cols = np.flatnonzero(annual_ranks.le(max(sizes)).any().to_numpy())
+        codes = [order[k] for k in cols]
+        values = {key: a[begin:stop,cols] for key,a in m.items()}
+        events = signals[begin:stop][:,:,cols]
+        priority,corr = correlation_limits(local_index,values,start_date=previous)
+        eligible_rank = ranks.iloc[begin:stop].loc[:,codes]
+        print("PERIOD",year,str(previous.date()),str(index.index[days[0]].date()),
+              str(index.index[days[-1]].date()),len(days),benchmark,flush=True)
+        for size in sizes:
+            eligible = eligible_rank.le(size).to_numpy()
+            assert np.all(eligible[local_index.index>previous].sum(axis=1)==size)
+            row = simulate(local_index,values,last[cols]-begin,codes,names,priority,eligible,("c","c"),events,
+                           f"year{year}_top{size}",corr,closing_auction=True,start_date=previous)
+            stats.append(dict(year=year,size=size,kospi_return=benchmark,sessions=len(days),
+                              first=str(index.index[days[0]].date()),last=str(index.index[days[-1]].date()),**row))
+    result = pd.DataFrame(stats)
+    assert len(result)==len(sizes)*len(years)
+    result.to_csv(OUT/"calendar_summary.csv",index=False)
+    print("CALENDAR_RESULTS",result[["year","size","ret","mdd","kospi_return","delist"]].to_json(orient="records"),flush=True)
 
 
 def intraday_study():
@@ -676,8 +737,11 @@ if __name__ == "__main__":
     parser.add_argument("--close-only", action="store_true")
     parser.add_argument("--close-sizes", type=int, nargs="+", default=CLOSE_UNIVERSE_SIZES)
     parser.add_argument("--intraday", action="store_true")
+    parser.add_argument("--calendar-years", action="store_true")
     args = parser.parse_args()
-    if args.intraday:
+    if args.calendar_years:
+        calendar_year_study()
+    elif args.intraday:
         intraday_study()
     elif args.close_only:
         if min(args.close_sizes) < 1:
