@@ -148,17 +148,19 @@ def panels(index, data, order, use_closes_for_channels=False):
     return mats, last, adjustments
 
 
-def breakout_events(m, reverse):
+def breakout_events(m, reverse, phases=None, open_stages=(0,)):
     # Track every instrument before the test begins. The previous hypothetical trade may be long or short.
     rows, cols = m["o"].shape
-    if reverse == "near":
+    if phases is not None:
+        phases = list(phases)
+    elif reverse == "near":
         high_is_nearer = (m["h"] - m["o"]) < (m["o"] - m["l"])
         m["first"] = np.where(high_is_nearer, m["h"], m["l"])
         m["second"] = np.where(high_is_nearer, m["l"], m["h"])
         phases = ["o", "first", "second", "c"]
     else:
         phases = ["o", "h", "l", "c"] if reverse else ["o", "l", "h", "c"]
-    events = np.full((rows, 4, cols), np.nan)
+    events = np.full((rows, len(phases), cols), np.nan)
     for k in range(cols):
         side = 0
         won = False
@@ -172,7 +174,9 @@ def breakout_events(m, reverse):
             entered_long = entered_short = False
             for phase, col in enumerate(phases):
                 p = m[col][i, k]
-                gap = phase == 0
+                if not np.isfinite(p):
+                    continue
+                gap = prev is None or (phase in open_stages and p != prev)
                 rising = gap or p > prev
                 falling = gap or p < prev
                 # At the open orders crossed by a gap execute at the opening print.
@@ -227,7 +231,8 @@ def room(k, pos, corr):
 
 
 def simulate(index, m, last, order, names, priority, eligible, phases, events, label, correlations,
-             buy_fee=.0005, sell_fee=.0025, retry=False, align_dec19=None, closing_auction=False):
+             buy_fee=.0005, sell_fee=.0025, retry=False, align_dec19=None, closing_auction=False,
+             open_stages=(0,)):
     initial = CAPITAL
     cash = equity = float(initial)
     annual_base = notional = float(initial)
@@ -288,8 +293,10 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                 target, fac = m[field][i, k], m["factor"][i,k]
                 if not np.isfinite(target):
                     continue
-                gap = stage == 0 or closing_auction
-                previous = target if gap else m[phases[stage - 1]][i,k]
+                previous = target if stage == 0 else m[phases[stage - 1]][i,k]
+                gap = stage == 0 or closing_auction or (stage in open_stages and target != previous)
+                if gap:
+                    previous = target
                 if closing_auction:
                     # Two accounting passes over the same closing print: release all sale proceeds, then allocate buys.
                     rising, falling = stage == 1, stage == 0
@@ -481,8 +488,36 @@ def intraday_study():
                 row = simulate(index,m,last,order,names,priority,eligible,path,events,label,correlations)
                 results.append(dict(size=size,selection=selection,path=tag,**row))
     pd.DataFrame(results).to_csv(OUT/"intraday_daily_bar_scenarios.csv",index=False)
-    from intraday_quotes import inspect_sources
-    inspect_sources()
+    from intraday_quotes import verified_hours, hourly_path
+    hours, accepted = verified_hours(index, m, order, OUT)
+    coverage = []
+    for size in CLOSE_UNIVERSE_SIZES:
+        mask = ranks.le(size).to_numpy() & np.isfinite(m["c"])
+        mask[index.index<=START] = False
+        row = dict(size=size, eligible_stock_days=int(mask.sum()), matched_stock_days=int((accepted & mask).sum()))
+        print("HOURLY_COVERAGE",json.dumps(row),flush=True)
+        coverage.append(row)
+    pd.DataFrame(coverage).to_csv(OUT/"hourly_coverage.csv",index=False)
+    if not accepted[index.index>START].any():
+        return
+    results = []
+    for policy in ["low","high","near"]:
+        phases = hourly_path(index,m,hours,accepted,policy)
+        opens = tuple(range(0,len(phases),4))
+        path,events = breakout_events(m,None,phases,opens)
+        for size in CLOSE_UNIVERSE_SIZES:
+            for selection,elig in [("rolling",ranks.le(size).to_numpy()),
+                                   ("annual",np.broadcast_to(np.isin(order,annual[:size]),ranks.shape))]:
+                label = f"hour_{policy}_{selection}_top{size}"
+                row = simulate(index,m,last,order,names,priority,elig,path,events,label,correlations,open_stages=opens)
+                fills = pd.read_csv(OUT/f"{label}_fills.csv",dtype={"code":str})
+                dates = index.index.get_indexer(pd.to_datetime(fills.date))
+                cols = pd.Index(order).get_indexer(fills.code)
+                row["fills_on_matched_days"] = int(accepted[dates,cols].sum())
+                row["total_fills"] = len(fills)
+                print("CHECKED_FILLS",label,row["fills_on_matched_days"],len(fills),flush=True)
+                results.append(dict(size=size,selection=selection,path=policy,**row))
+    pd.DataFrame(results).to_csv(OUT/"intraday_hourly_scenarios.csv",index=False)
 
 
 def main():
