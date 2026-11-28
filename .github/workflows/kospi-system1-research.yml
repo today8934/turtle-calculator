@@ -23,6 +23,8 @@ jobs:
           done
       - name: Validate data and run simulation
         run: python -u research/kospi_system1.py --calendar-years --calendar-range 2010 2019
+      - name: Cross-check every recorded close, cash flow and daily valuation
+        run: python -u research/audit_calendar.py
       - uses: actions/upload-artifact@v4
         with:
           name: kospi-annual-close-2010-2019
