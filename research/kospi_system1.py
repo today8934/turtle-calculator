@@ -222,7 +222,7 @@ def room(k, pos, corr):
 
 
 def simulate(index, m, last, order, names, priority, eligible, phases, events, label, correlations,
-             buy_fee=.0005, sell_fee=.0025):
+             buy_fee=.0005, sell_fee=.0025, retry=False):
     initial = CAPITAL
     cash = equity = float(initial)
     annual_base = notional = float(initial)
@@ -235,7 +235,25 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
         ledger.append([history[i].date(), stage, order[k], names[order[k]], action,
                        price / fac if fac else 0, qty * fac if fac else qty, cause, cash])
 
+    def buy_lot(k, fill, qty, n, held):
+        nonlocal cash
+        cash -= qty * fill * (1 + buy_fee)
+        if held is None:
+            held = dict(qty=0.,units=0,unit=qty,n=n,latest=fill,lots=[])
+            pos[k] = held
+        else:
+            held["lots"] = [(executable(s + .5*n, fac, False), q) for s,q in held["lots"]]
+        held["qty"] += qty
+        held["units"] += 1
+        held["latest"] = fill
+        held["lots"].append((executable(fill - 2*n, fac, False), qty))
+        record(k, "buy", fill, qty, "entry" if held["units"]==1 else "add")
+        waiting.pop(k, None)
+        return held
+
     for i in range(start + 1, len(index)):
+        waiting = {}
+        sales = 0
         if history[i].year != history[i-1].year:
             annual_base = notional = equity
             next_cut = annual_base * .90
@@ -278,6 +296,8 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                             continue
                         px = target if gap else min(previous, level)
                         cash += qty * px * (1 - sell_fee)
+                        sales += 1
+                        waiting.pop(k, None)
                         record(k, "sell", px, qty, "2N" if stop >= channel else "10D")
                     hold["lots"] = remaining
                     hold["qty"] = sum(q for _,q in remaining)
@@ -292,12 +312,9 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                     if watch and order[k]=="009150":
                         print("WATCH_ORDER",label,stage,"price",price/fac,"desired",desired,"affordable",shares,"cash",cash,flush=True)
                     if shares > 0 and shares == desired:
-                        qty = shares / fac
-                        cash -= qty * price * (1 + buy_fee)
-                        hold = dict(qty=qty, units=1, unit=qty, n=n, latest=price,
-                                    lots=[(executable(price - 2*n, fac, False), qty)])
-                        pos[k] = hold
-                        record(k, "buy", price, qty, "entry")
+                        hold = buy_lot(k, price, shares / fac, n, None)
+                    elif retry and desired > 0:
+                        waiting.setdefault(k, (None, desired, n, sales))
                 if hold is None or not rising:
                     continue
                 while hold["units"] < 4:
@@ -308,15 +325,22 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                     desired = math.floor(hold["unit"]*fac + 1e-8)
                     shares = min(desired, math.floor(cash / (px / fac * (1 + buy_fee))))
                     if shares < 1 or shares < desired:
+                        if retry and desired > 0:
+                            waiting.setdefault(k, (hold, desired, hold["n"], sales))
                         break
-                    qty = shares / fac
-                    cash -= qty * px * (1 + buy_fee)
-                    hold["qty"] += qty
-                    hold["units"] += 1
-                    hold["latest"] = px
-                    hold["lots"] = [(executable(s + .5*hold["n"],fac,False), q) for s,q in hold["lots"]]
-                    hold["lots"].append((executable(px - 2*hold["n"],fac,False), qty))
-                    record(k, "buy", px, qty, "add")
+                    buy_lot(k, px, shares / fac, hold["n"], hold)
+        if retry:
+            # A fixed, independently observable execution time, with no use of a fabricated quote at the sale timestamp.
+            stage = 4
+            for k in sorted(list(waiting), key=lambda j: (priority[i,j],order[j])):
+                original, desired, n, sale_count_at_miss = waiting[k]
+                if sales <= sale_count_at_miss or pos.get(k) is not original or not room(k,pos,correlations[i]):
+                    continue
+                fill, fac = m["c"][i,k], m["factor"][i,k]
+                if fill <= m["d10"][i,k] or desired * fill / fac * (1 + buy_fee) > cash:
+                    continue
+                buy_lot(k, fill, desired/fac, n, original)
+                print("RETRY_FILL", label, history[i].date(), order[k], names[order[k]], desired, round(fill/fac,2),flush=True)
         for k in pos:
             if np.isfinite(m["c"][i,k]):
                 marks[k] = m["c"][i,k]
@@ -369,6 +393,8 @@ def main():
         for name, eligible in [("rolling",rolling),("annual",post)]:
             results.append(simulate(index,m,last,order,names,priority,eligible,path,events,
                                     f"{name}_{tag}",correlations))
+        results.append(simulate(index,m,last,order,names,priority,rolling,path,events,
+                                f"retry_{tag}",correlations,retry=True))
         if tag == "low_first":
             compare_entries()
     pd.DataFrame(results).to_csv(OUT / "summary.csv", index=False)
