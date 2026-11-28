@@ -274,7 +274,16 @@ def executable_stop(stop, factor, up, old, strict, etf=False):
 
 def simulate(index, m, last, order, names, priority, eligible, phases, events, label, correlations,
              buy_fee=.0005, sell_fee=.0025, retry=False, align_dec19=None, closing_auction=False,
-             open_stages=(0,), start_date=START, intraday_exit=None, etf_sell_fee=.0005):
+             open_stages=(0,), start_date=START, intraday_exit=None, etf_sell_fee=.0005,
+             market_gate=None, force_flat_on_gate=False):
+    if market_gate is not None:
+        market_gate = np.asarray(market_gate)
+        if market_gate.shape != (len(index),) or market_gate.dtype != np.bool_:
+            raise ValueError("market_gate must contain one boolean per session")
+        if not closing_auction or tuple(phases)!=("c","c") or intraday_exit or align_dec19 is not None or retry:
+            raise ValueError("market_gate requires close-only execution")
+    elif force_flat_on_gate:
+        raise ValueError("forced close requires a market gate")
     initial = CAPITAL
     cash = equity = float(initial)
     annual_base = notional = float(initial)
@@ -319,6 +328,10 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
             notional *= .8
             next_cut -= notional * .10
         eligible_today = eligible[i]
+        allow_risk = market_gate is None or market_gate[i]
+        if force_flat_on_gate and not allow_risk:
+            for position in pos.values():
+                position["index_exit_pending"] = True
         for k in list(pos):
             if last[k] < i:
                 stage, fac = -1, 1.
@@ -349,12 +362,13 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                     rising, falling = gap or target > previous, gap or target < previous
                 hold = pos.get(k)
                 if hold is not None and falling:
+                    index_exit = hold.get("index_exit_pending", False)
                     channel = m["touch_low10" if intraday_exit in ("literal","touch") else "d10"][i,k]
                     remaining = []
                     for stop, qty in sorted(hold["lots"], reverse=True):
                         live_stop = executable_stop(stop,fac,False,old_tick,intraday_exit=="literal",etfs[k]) if intraday_exit else stop
                         level = max(live_stop, channel)
-                        if target > level:
+                        if not index_exit and target > level:
                             remaining.append((stop, qty))
                             continue
                         if intraday_exit:
@@ -364,12 +378,15 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                         cash += qty * px * (1 - sale_rates.iloc[k])
                         sales += 1
                         waiting.pop(k, None)
-                        record(k, "sell", px, qty, "2N" if live_stop >= channel else "10D",level)
+                        reason = "index_exit" if index_exit else ("2N" if live_stop >= channel else "10D")
+                        record(k, "sell", px, qty, reason, np.nan if index_exit else level)
                     hold["lots"] = remaining
                     hold["qty"] = sum(q for _,q in remaining)
                     if not remaining:
                         del pos[k]
                         hold = None
+                if not allow_risk:
+                    continue
                 price = events[i, stage, k]
                 if hold is None and rising and eligible_today[k] and np.isfinite(price) and room(k, pos, correlations[i]):
                     n = m["n"][i,k]
