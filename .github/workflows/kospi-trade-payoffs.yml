@@ -1,0 +1,27 @@
+name: KOSPI completed trade payoffs
+on:
+  push:
+    branches: [research/kospi-system1-20261127]
+    paths:
+      - research/kospi_trade_payoffs.py
+      - .github/workflows/kospi-trade-payoffs.yml
+permissions:
+  actions: read
+  contents: read
+jobs:
+  calculate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: 46114743756
+          github-token: ${{ github.token }}
+          pattern: transactions-*
+          merge-multiple: true
+          path: transactions
+      - run: python -u research/kospi_trade_payoffs.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kospi-trade-payoffs-2010-2019
+          path: payoffs/

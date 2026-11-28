@@ -2,6 +2,10 @@ name: KOSPI System 1 research
 on:
   push:
     branches: [research/kospi-system1-20261127]
+    paths-ignore:
+      - research/kospi_trade_payoffs.py
+      - research/results/*
+      - .github/workflows/kospi-trade-payoffs.yml
 permissions:
   contents: read
 jobs:
