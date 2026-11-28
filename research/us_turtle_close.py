@@ -21,6 +21,8 @@ class ClosePanels:
     returns: np.ndarray
     last: np.ndarray
     dividend: np.ndarray
+    spin_ratio: np.ndarray = None
+    spin_cash: np.ndarray = None
 
 
 def _price(price, factor, up, strict=False):
@@ -54,6 +56,8 @@ def prepare(quotes, calendar=None, max_top=30):
     Missing ranks are ineligible. Rank only limits fresh entries, not exits/adds.
     Dividend is gross cash per raw share on the ex-date; use split-only prices
     when providing it. With no dividend column, returns are price returns.
+    If pre-spinoff OHLC are adjusted, provide spin_ratio and spin_cash on
+    the ex-date. Child shares are liquidated at the contemporaneous close.
     """
     q = quotes.copy(deep=False)
     q["date"] = pd.to_datetime(q.date)
@@ -82,6 +86,12 @@ def prepare(quotes, calendar=None, max_top=30):
     if not symbols:
         raise ValueError("No securities in the supplied ranking")
     c, fac, n, lo10, hi10, div = [np.full(shape,np.nan) for _ in range(6)]
+    spin_ratio = spin_cash = None
+    if "spin_ratio" in q or "spin_cash" in q:
+        if not {"spin_ratio","spin_cash"}.issubset(q):
+            raise ValueError("Spinoff ratio and cash must be supplied together")
+        spin_ratio = np.ones(shape)
+        spin_cash = np.zeros(shape)
     side_signal = np.zeros(shape,dtype=np.int8)
     last = np.full(len(symbols),-1,dtype=int)
     sec_index = {s:k for k,s in enumerate(symbols)}
@@ -99,6 +109,14 @@ def prepare(quotes, calendar=None, max_top=30):
         if not np.all(np.isfinite(factor)&(factor>0)):
             raise ValueError(f"{symbol}: invalid adjusted / raw close ratio")
         c[pos,k],fac[pos,k],last[k] = prices,factor,pos[-1]
+        if spin_ratio is not None:
+            r = d.spin_ratio.fillna(1.).to_numpy(dtype=float)
+            v = d.spin_cash.fillna(0.).to_numpy(dtype=float)
+            if not (np.isfinite(r)&(r>0)&(r<=1)&np.isfinite(v)&(v>=0)).all():
+                raise ValueError(f"{symbol}: invalid spinoff terms")
+            if not np.allclose(r, 1 / (1 + v / (prices / factor)), rtol=1e-8, atol=1e-10):
+                raise ValueError(f"{symbol}: spinoff adjustment inconsistent with cash per share")
+            spin_ratio[pos,k],spin_cash[pos,k] = r,v
         if "dividend" in d:
             div[pos,k] = d.dividend.fillna(0)
         previous = d.close.shift()
@@ -141,7 +159,7 @@ def prepare(quotes, calendar=None, max_top=30):
     strength = (closes.shift(1)-closes.shift(64)).to_numpy()/n
     returns = closes.pct_change(fill_method=None).to_numpy()
     return ClosePanels(dates,symbols,c,fac,ranked.to_numpy(dtype=float),n,lo10,hi10,
-                       side_signal,strength,returns,last,div)
+                       side_signal,strength,returns,last,div,spin_ratio,spin_cash)
 
 
 def _room(panels,i,k,side,positions):
@@ -164,7 +182,7 @@ def simulate_year(panels,year,top,initial_usd,fee_bps=5,borrow_bps=50,settlement
 
 
 def simulate_period(panels,first_year,last_year,top,initial_usd,fee_bps=5,borrow_bps=50,
-                    settlements=None,terminal_policy="raise"):
+                    settlements=None,terminal_policy="raise",capture_attribution=False):
     """Single USD cash account for an inclusive range of years. Positions, cash,
     fees, and frozen entry N survive year-end. Reset the new-entry risk base to
     the previous closing equity on the first trading day of each calendar year.
@@ -190,11 +208,15 @@ def simulate_period(panels,first_year,last_year,top,initial_usd,fee_bps=5,borrow
     cash=equity=risk_base=notional=float(initial_usd)
     cut=initial_usd*.9
     pos,ledger,finished={},{},[]
+    security_realized={}
+    attribution=[]
+    prev_year_values={}
+    prev_year_equity=equity
     trades=[]
     marks=np.full(len(m.symbols),np.nan)
     factors=marks.copy()
     daily=[(m.dates[days[0]-1],cash,equity,0.,0.,0.,0)]
-    fees=borrow=dividends=0.
+    fees=borrow=dividends=spinoff_distributions=0.
     missing_term=0
 
     def record(k,sign,enter,qty,px,factor,reason):
@@ -213,6 +235,8 @@ def simulate_period(panels,first_year,last_year,top,initial_usd,fee_bps=5,borrow
     def complete(k):
         p=ledger.pop(k)
         finished.append((p["net"],p["net"]/p["notional"]*100))
+        if capture_attribution:
+            security_realized[k]=security_realized.get(k,0.)+p["net"]
         del pos[k]
 
     for i in days:
@@ -238,6 +262,18 @@ def simulate_period(panels,first_year,last_year,top,initial_usd,fee_bps=5,borrow
         for k in list(pos):
             p=pos[k]
             s=p["side"]
+            if m.spin_ratio is not None and m.spin_ratio[i,k] != 1:
+                # The adjusted quote factor increases at the spinoff. Reduce
+                # synthetic lots by its inverse to conserve the real parent shares.
+                # Stops and N already live in the continuous adjusted price units.
+                ratio=m.spin_ratio[i,k]
+                p["lots"]=[(stop, qty*ratio) for stop,qty in p["lots"]]
+                p["qty"]*=ratio
+                p["unit"]*=ratio
+                flow=s*p["qty"]*factors[k]*m.spin_cash[i,k]
+                cash+=flow
+                ledger[k]["net"]+=flow
+                spinoff_distributions+=flow
             raw_dist=m.dividend[i,k]
             if np.isfinite(raw_dist) and raw_dist:
                 flow=s*p["qty"]*factors[k]*raw_dist
@@ -321,6 +357,20 @@ def simulate_period(panels,first_year,last_year,top,initial_usd,fee_bps=5,borrow
         equity=cash+long_value-short_value
         assert np.isfinite(equity) and equity>0,(date,equity)
         daily.append((date,cash,equity,long_value,short_value,cash-2*short_value,len(pos)))
+        if capture_attribution and (i==days[-1] or m.dates[i+1].year != date.year):
+            values=security_realized.copy()
+            for k,p in pos.items():
+                marking=p["side"]*p["qty"]*marks[k]
+                values[k]=values.get(k,0.)+ledger[k]["net"]+marking
+            year_pnl=0.
+            for k in sorted(set(values)|set(prev_year_values)):
+                pnl=values.get(k,0.)-prev_year_values.get(k,0.)
+                if abs(pnl)>.000001:
+                    attribution.append(dict(year=date.year,top=top,symbol=m.symbols[k],
+                                            pnl_usd=pnl,contribution_pct=pnl/prev_year_equity*100))
+                year_pnl+=pnl
+            assert abs(prev_year_equity+year_pnl-equity)<.01,(date,year_pnl,equity)
+            prev_year_values,prev_year_equity=values,equity
 
     equity_curve=pd.DataFrame(daily,columns=["date","cash_book","equity","long_value","short_value","free_collateral","held"])
     fills=pd.DataFrame(trades,columns=["date","symbol","side","reason","action","raw_price","raw_shares","fee_usd","cash_book_after"])
@@ -339,7 +389,10 @@ def simulate_period(panels,first_year,last_year,top,initial_usd,fee_bps=5,borrow
                  adds=int(fills.reason.eq("add").sum()),closed=len(finished),wins=len(wins),losses=len(losses),
                  win_rate=100*len(wins)/len(finished) if finished else None,
                  avg_win_pct=np.mean(wins) if wins else None,avg_loss_pct=np.mean(losses) if losses else None,
-                 fees_usd=fees,borrow_usd=borrow,dividends_usd=dividends,held=len(pos),fills=len(fills),
+                 fees_usd=fees,borrow_usd=borrow,dividends_usd=dividends,
+                 spinoff_cash_usd=spinoff_distributions,held=len(pos),fills=len(fills),
                  estimated_terminal=missing_term,realized_usd=closed_pnl,open_pnl_usd=open_pnl,
                  first=str(m.dates[days[0]].date()),last=str(m.dates[days[-1]].date()),sessions=len(days))
+    if capture_attribution:
+        summary["attribution"]=attribution
     return summary,equity_curve,fills

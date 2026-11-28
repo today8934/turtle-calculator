@@ -9,6 +9,7 @@ import pandas as pd
 
 from us_turtle_close import prepare, simulate_year, simulate_period
 from us_fx import year_endpoints
+from us_spinoffs import apply_spinoffs
 
 
 def assemble(dolt, early, dates, cache):
@@ -19,10 +20,26 @@ def assemble(dolt, early, dates, cache):
     db.execute("CREATE OR REPLACE TEMP VIEW cal AS SELECT date::DATE AS date,i FROM calendar_frame")
     for name, path in (("newer", dolt), ("older", early)):
         db.read_parquet(str(path)).create_view(name + "_input")
+        # Former parent shareholders became shareholders of the renamed issuer
+        # one-for-one, in addition to receiving the subsidiaries. Some vendors
+        # already use the successor's ticker on old rows; retain one actual bar.
+        rule = """CASE WHEN symbol='UTX' AND date<DATE '2020-04-03' THEN 'RTX'
+                        WHEN symbol='GOOG' AND date<DATE '2014-04-03' THEN 'GOOGL'
+                        WHEN symbol='MOT' AND date<DATE '2011-01-04' THEN 'MSI'
+                        WHEN symbol='KFT' AND date<DATE '2012-10-02' THEN 'MDLZ'"""
         if name == "older":
-            db.execute("CREATE TEMP VIEW older AS SELECT * REPLACE (CASE WHEN symbol='DELL' THEN 'DELL~2013' ELSE symbol END AS symbol) FROM older_input")
-        else:
-            db.execute("CREATE TEMP VIEW newer AS SELECT * FROM newer_input")
+            rule += " WHEN symbol='DELL' THEN 'DELL~2013'"
+        rule += " ELSE symbol END"
+        db.execute(f"""
+            CREATE TEMP VIEW {name} AS
+            SELECT * EXCLUDE(key_symbol) REPLACE(key_symbol AS symbol) FROM (
+               SELECT *, {rule} AS key_symbol FROM {name}_input
+               WHERE symbol IN ('UTX','RTX','KFT','MDLZ','DELL','DELL~2013','GOOG','GOOGL','MOT','MSI')
+            ) AS canon QUALIFY row_number() OVER (PARTITION BY date,key_symbol
+                       ORDER BY (symbol IN ('UTX','KFT','DELL','GOOG','MOT')) DESC,symbol)=1
+            UNION ALL SELECT * FROM {name}_input
+            WHERE symbol NOT IN ('UTX','RTX','KFT','MDLZ','DELL','DELL~2013','GOOG','GOOGL','MOT','MSI')
+        """)
     # Both vendors supply split-only OHLC. Align the old adjusted basis across the
     # boundary so historical channel/ATR levels remain meaningful. Raw cash is unchanged.
     db.execute("""
@@ -92,6 +109,7 @@ def assemble(dolt, early, dates, cache):
         LEFT JOIN winners w ON b.symbol=w.symbol AND b.i=w.i ORDER BY b.symbol,b.date
     """).fetchdf()
     print("RANKED", len(frame), frame.symbol.nunique(), frame.date.min(),frame.date.max(),flush=True)
+    frame=apply_spinoffs(frame,dolt,audit_path=cache/"corporate-actions.csv")
     frame["move"]=frame.groupby("symbol",sort=False).close.pct_change(fill_method=None)
     extremes=frame.loc[frame["rank"].le(30) & frame.move.abs().gt(.50),["date","symbol","rank","move"]].sort_values("move")
     print("EXTREMES",extremes.to_json(orient="records",date_format="iso"),flush=True)
@@ -127,9 +145,11 @@ def run(args):
                 ("year","top","ret","krw_pct","spx_krw_pct","spx_usd_pct","long_entries","short_entries","mdd","estimated_terminal")})
         print("ANNUAL",json.dumps(group),flush=True)
     continuous=[]
+    attribution=[]
     long_run=[]
     for top in [10,20,30]:
-        s,d,f=simulate_period(panels,2010,end.year,top,100_000_000/fx.iloc[0].fx_start,terminal_policy="last_mark")
+        s,d,f=simulate_period(panels,2010,end.year,top,100_000_000/fx.iloc[0].fx_start,terminal_policy="last_mark",capture_attribution=True)
+        attribution.extend(s.pop("attribution"))
         for year,y in fx.iterrows():
             cy=d[d.date.dt.year.eq(year)]
             prior=d[d.date.lt(cy.date.min())].iloc[-1]
@@ -146,6 +166,10 @@ def run(args):
                              long_entries=s["long_entries"],short_entries=s["short_entries"],estimated_terminal=s["estimated_terminal"]))
         d.to_csv(out/f"continuous-daily-{top}.csv.gz",index=False)
         f.to_csv(out/f"continuous-fills-{top}.csv.gz",index=False)
+    bysym=pd.DataFrame(attribution)
+    bysym.to_csv(out/"continuous-attribution.csv",index=False)
+    focus=bysym.loc[bysym.year.isin([2013,2022,2024])].sort_values("contribution_pct")
+    print("DRIVERS",pd.concat([focus.groupby(["year","top"]).head(2),focus.groupby(["year","top"]).tail(2)]).to_json(orient="records"),flush=True)
     cont=pd.DataFrame(continuous)
     assert len(cont)==51
     cont.to_csv(out/"continuous-annual.csv",index=False)

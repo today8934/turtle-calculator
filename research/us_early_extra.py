@@ -131,7 +131,7 @@ def yahoo_bytes(symbol):
 
 
 def past_archives(symbol):
-    mapped={"RIMM":["RIMM","BBRY"],"TOT":["TOT","TTE"],"HBC":["HBC","HSBC"]}.get(symbol,[symbol])
+    mapped={"RIMM":["BBRY","RIMM"],"TOT":["TOT","TTE"],"HBC":["HBC","HSBC"]}.get(symbol,[symbol])
     for s in mapped:
         try:
             r=requests.get(KIBOT.format(s),headers=HEADER,timeout=(4,10))
@@ -174,7 +174,9 @@ def calibrate(d, ref, sym, source):
             d["turnover"]*=value_scale
     if "dividend" not in d:
         d["dividend"]=0.
-    d["symbol"]=sym
+    # Reuse the 2011 tape's identifier when an historical rename was verified
+    # by the price comparison, so the signal state crosses the year boundary.
+    d["symbol"]=ref.symbol.iloc[0] if overlap and "symbol" in ref else sym
     d["eligible"]=True
     return d[FIELDS], [sym,source,overlap,corr,scale,value_scale,"added"]
 
