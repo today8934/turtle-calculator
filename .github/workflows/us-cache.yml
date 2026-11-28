@@ -1,0 +1,32 @@
+name: Prepare US stock history
+on:
+  push:
+    branches: [research/us-system1-2010-2026]
+    paths: [.github/workflows/us-cache.yml]
+permissions:
+  contents: read
+jobs:
+  dolt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - run: |
+          curl -fsSL --retry 3 https://github.com/dolthub/dolt/releases/latest/download/dolt-linux-amd64.tar.gz | tar xz
+          sudo install dolt-linux-amd64/bin/dolt /usr/local/bin/dolt
+          dolt version
+          mkdir -p /tmp/usdata
+          cd /tmp/usdata
+          if dolt clone --help 2>&1 | grep -q -- '--depth'; then
+            dolt clone --depth 1 post-no-preference/stocks stocks
+          else
+            dolt clone post-no-preference/stocks stocks
+          fi
+          cd stocks
+          dolt rev-parse HEAD
+          dolt sql -q "select * from ohlcv where date IN ('2014-06-06','2014-06-09','2024-06-07','2024-06-10') and act_symbol in ('AAPL','NVDA') order by act_symbol,date"
+          dolt sql -q "select * from dividend where act_symbol='AAPL' order by ex_date desc limit 3"
+          du -sh .
+      - uses: actions/cache/save@v4
+        with:
+          path: /tmp/usdata/stocks
+          key: us-dolt-stocks-20261127-r1
