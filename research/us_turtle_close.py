@@ -159,7 +159,16 @@ def _room(panels,i,k,side,positions):
 
 
 def simulate_year(panels,year,top,initial_usd,fee_bps=5,borrow_bps=50,settlements=None,terminal_policy="raise"):
-    """Annual independent USD cash account; dictionary of settlements uses (date,id)
+    """Start an empty USD account on the first session of the supplied year."""
+    return simulate_period(panels,year,year,top,initial_usd,fee_bps,borrow_bps,settlements,terminal_policy)
+
+
+def simulate_period(panels,first_year,last_year,top,initial_usd,fee_bps=5,borrow_bps=50,
+                    settlements=None,terminal_policy="raise"):
+    """Single USD cash account for an inclusive range of years. Positions, cash,
+    fees, and frozen entry N survive year-end. Reset the new-entry risk base to
+    the previous closing equity on the first trading day of each calendar year.
+    Dictionary of settlements uses (date,id)
     -> raw cash per share. Missing, unverified terminal events raise by default;
     terminal_policy='last_mark' explicitly assumes proceeds at the last quote.
     All execution occurs at close with exits funded before entries. New shorts
@@ -168,16 +177,17 @@ def simulate_year(panels,year,top,initial_usd,fee_bps=5,borrow_bps=50,settlement
     if initial_usd<=0 or terminal_policy not in ("raise","last_mark"):
         raise ValueError("Invalid funding or terminal policy")
     m=panels
-    days=np.flatnonzero(m.dates.year==year)
-    if not len(days) or not days[0]:
-        raise ValueError(f"{year}: missing test dates or prior warmup")
+    days=np.flatnonzero((m.dates.year>=first_year) & (m.dates.year<=last_year))
+    if (not len(days) or not days[0] or
+            set(m.dates[days].year) != set(range(first_year,last_year+1))):
+        raise ValueError(f"{first_year}-{last_year}: missing test dates or prior warmup")
     settle = {(pd.Timestamp(date),str(sym)):float(value)
               for (date,sym),value in (settlements or {}).items()}
     if any(not np.isfinite(v) or v<0 for v in settle.values()):
         raise ValueError("Invalid terminal proceeds")
     terminal_dates = {s:d for (d,s) in sorted(settle)}
     fee_rate,borrow_rate=fee_bps/10000,borrow_bps/10000
-    cash=equity=notional=float(initial_usd)
+    cash=equity=risk_base=notional=float(initial_usd)
     cut=initial_usd*.9
     pos,ledger,finished={},{},[]
     trades=[]
@@ -207,9 +217,11 @@ def simulate_year(panels,year,top,initial_usd,fee_bps=5,borrow_bps=50,settlement
 
     for i in days:
         date=m.dates[i]
-        if equity>=initial_usd:
-            notional=initial_usd
-            cut=.9*initial_usd
+        if date.year!=m.dates[i-1].year:
+            risk_base=equity
+        if equity>=risk_base:
+            notional=risk_base
+            cut=.9*risk_base
         while equity<=cut and notional>=.01:
             notional*=.8
             cut-=.1*notional
@@ -319,7 +331,9 @@ def simulate_year(panels,year,top,initial_usd,fee_bps=5,borrow_bps=50,settlement
     wins=[r for v,r in finished if v>1e-8]
     losses=[r for v,r in finished if v<-1e-8]
     entry=fills.reason.eq("entry")
-    summary=dict(year=year,top=top,initial=initial_usd,final=equity,ret=(equity/initial_usd-1)*100,
+    summary=dict(year=first_year if first_year==last_year else None,
+                 first_year=first_year,last_year=last_year,
+                 top=top,initial=initial_usd,final=equity,ret=(equity/initial_usd-1)*100,
                  mdd=(vals/vals.cummax()-1).min()*100,entries=int(entry.sum()),
                  long_entries=int((entry&fills.side.eq(1)).sum()),short_entries=int((entry&fills.side.eq(-1)).sum()),
                  adds=int(fills.reason.eq("add").sum()),closed=len(finished),wins=len(wins),losses=len(losses),

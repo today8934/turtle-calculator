@@ -87,19 +87,19 @@ def prepare_dolt(cache, output, end, wiki_splits=None):
     )
     db.execute(f"""
         CREATE TEMP TABLE master AS
-        SELECT act_symbol ticker, security_name, listing_exchange,
+        SELECT act_symbol AS ticker, security_name, listing_exchange,
           (NOT regexp_matches(lower(coalesce(security_name, '')), {sql_literal(name_exclusions)})
            AND upper(coalesce(is_etf, '')) IN ('0','N','NO','FALSE')
            AND upper(coalesce(is_test_issue, '')) NOT IN ('1','Y','YES','TRUE')
            AND regexp_matches(upper(coalesce(listing_exchange, '')), 'NASDAQ|NYSE|AMEX|NYSEMKT|BATS|CBOE|IEX|^([QNAPZV])$')
            AND security_name IS NOT NULL
-          ) eligible
+          ) AS eligible
         FROM symbol_src
     """)
     db.execute("""
         CREATE TEMP TABLE declared AS
-        SELECT act_symbol ticker, CAST(ex_date AS DATE) ex_date,
-            try_cast(to_factor AS DOUBLE)/nullif(try_cast(for_factor AS DOUBLE),0) ratio
+        SELECT act_symbol AS ticker, CAST(ex_date AS DATE) AS ex_date,
+            try_cast(to_factor AS DOUBLE)/nullif(try_cast(for_factor AS DOUBLE),0) AS ratio
         FROM split_src
     """)
     if wiki_splits:
@@ -109,9 +109,9 @@ def prepare_dolt(cache, output, end, wiki_splits=None):
         db.execute(f"""
           INSERT INTO declared
           SELECT m.ticker,CAST(w.ex_date AS DATE),CAST(w.ratio AS DOUBLE)
-          FROM read_parquet({sql_literal(Path(wiki_splits).resolve())}) w JOIN master m
+          FROM read_parquet({sql_literal(Path(wiki_splits).resolve())}) AS w JOIN master AS m
             ON replace(m.ticker,'.','-')=w.symbol
-          ANTI JOIN declared d ON m.ticker=d.ticker AND
+          ANTI JOIN declared AS d ON m.ticker=d.ticker AND
                abs(CAST(w.ex_date AS DATE)-d.ex_date)<=5 AND
                abs(CAST(w.ratio AS DOUBLE)-d.ratio)<0.0001
           WHERE w.ratio>0 AND w.ratio<>1
@@ -122,11 +122,11 @@ def prepare_dolt(cache, output, end, wiki_splits=None):
     db.execute(f"""
         CREATE TEMP TABLE bars AS
         WITH base AS (
-          SELECT o.act_symbol ticker, try_cast(o.date AS DATE) date,
-            try_cast(o.open AS DOUBLE) open, try_cast(o.high AS DOUBLE) high,
-            try_cast(o.low AS DOUBLE) low, try_cast(o.close AS DOUBLE) close,
-            try_cast(o.volume AS DOUBLE) volume, coalesce(m.eligible, false) eligible
-          FROM ohlcv_src o LEFT JOIN master m ON o.act_symbol=m.ticker
+          SELECT o.act_symbol AS ticker, try_cast(o.date AS DATE) AS "date",
+            try_cast(o.open AS DOUBLE) AS "open", try_cast(o.high AS DOUBLE) AS high,
+            try_cast(o.low AS DOUBLE) AS low, try_cast(o.close AS DOUBLE) AS "close",
+            try_cast(o.volume AS DOUBLE) AS volume, coalesce(m.eligible, false) AS eligible
+          FROM ohlcv_src AS o LEFT JOIN master AS m ON o.act_symbol=m.ticker
         )
         SELECT *, CASE WHEN ticker='FB' AND date BETWEEN DATE '2012-05-18' AND DATE '2022-06-08'
                        THEN 'META'
@@ -149,12 +149,12 @@ def prepare_dolt(cache, output, end, wiki_splits=None):
       WITH known AS (
         SELECT * FROM declared WHERE ex_date<=DATE '{end}'
       ), candidate AS (
-        SELECT k.ticker, k.ex_date, k.ratio, b.date day, b.symbol,
-               b.open, prev.close prior, abs(ln(prev.close/b.open/k.ratio)) error,
-               abs(ln(prev.close/b.open)) unchanged_error
-        FROM known k JOIN bars b
+        SELECT k.ticker, k.ex_date, k.ratio, b.date AS "day", b.symbol,
+               b.open, prev.close AS "prior", abs(ln(prev.close/b.open/k.ratio)) AS error,
+               abs(ln(prev.close/b.open)) AS unchanged_error
+        FROM known AS k JOIN bars AS b
           ON b.ticker=k.ticker AND b.date BETWEEN k.ex_date-4 AND k.ex_date+4
-        ASOF LEFT JOIN bars prev ON prev.symbol=b.symbol AND prev.date<b.date
+        ASOF LEFT JOIN bars AS prev ON prev.symbol=b.symbol AND prev.date<b.date
         WHERE ratio>0 AND ratio<>1 AND prev.close>0 AND b.open>0
       ), selected AS (
         SELECT * FROM candidate
@@ -163,28 +163,28 @@ def prepare_dolt(cache, output, end, wiki_splits=None):
           CASE WHEN day=ex_date AND error<least(0.16,abs(ln(ratio))*0.25) THEN 0 ELSE 1 END,
           error, abs(day-ex_date), day)=1
       )
-      SELECT symbol,day, exp(sum(ln(ratio))) ratio FROM selected GROUP BY symbol,day
+      SELECT symbol,day, exp(sum(ln(ratio))) AS ratio FROM selected GROUP BY symbol,day
     """)
     db.execute("""
       CREATE TEMP TABLE factors AS
       SELECT symbol,day,exp(-sum(ln(ratio)) OVER
-         (PARTITION BY symbol ORDER BY day DESC ROWS UNBOUNDED PRECEDING)) factor
+         (PARTITION BY symbol ORDER BY day DESC ROWS UNBOUNDED PRECEDING)) AS factor
       FROM actions
     """)
     db.execute("""
       CREATE TEMP TABLE distributions AS
-      SELECT act_symbol ticker, CAST(ex_date AS DATE) ex_date, sum(try_cast(amount AS DOUBLE)) amount
+      SELECT act_symbol AS ticker, CAST(ex_date AS DATE) AS ex_date, sum(try_cast(amount AS DOUBLE)) AS amount
       FROM dividend_src GROUP BY ticker,ex_date
     """)
     partial = output.with_suffix(".writing.parquet")
     print("Writing split-consistent daily prices", flush=True)
     db.execute(f"""
       COPY (
-        SELECT b.date, b.symbol, b.high*coalesce(f.factor,1) high,
-          b.low*coalesce(f.factor,1) low,b.close*coalesce(f.factor,1) close,
-          b.close raw_close,b.close*b.volume turnover,coalesce(d.amount,0) dividend,true eligible
-        FROM bars b ASOF LEFT JOIN factors f ON b.symbol=f.symbol AND b.date<f.day
-        LEFT JOIN distributions d ON b.ticker=d.ticker AND b.date=d.ex_date
+        SELECT b.date, b.symbol, b.high*coalesce(f.factor,1) AS high,
+          b.low*coalesce(f.factor,1) AS low,b.close*coalesce(f.factor,1) AS "close",
+          b.close AS raw_close,b.close*b.volume AS turnover,coalesce(d.amount,0) AS dividend,true AS eligible
+        FROM bars AS b ASOF LEFT JOIN factors AS f ON b.symbol=f.symbol AND b.date<f.day
+        LEFT JOIN distributions AS d ON b.ticker=d.ticker AND b.date=d.ex_date
       ) TO {sql_literal(partial)} (FORMAT PARQUET, COMPRESSION ZSTD)
     """)
     view = "read_parquet(" + sql_literal(partial) + ")"
@@ -204,6 +204,7 @@ def prepare_dolt(cache, output, end, wiki_splits=None):
         if not any(abs(row[0]-0.1)<0.001 for row in prior):
             raise RuntimeError(f"Missing Citigroup 1-for-10 reverse split on 2011-05-09: {prior}")
     partial.replace(output)
+    view = "read_parquet(" + sql_literal(output) + ")"
     cash_samples = db.execute("""
       SELECT ticker,ex_date,amount FROM distributions WHERE
         (ticker='AAPL' AND ex_date IN (DATE '2014-05-08',DATE '2014-08-07'))
@@ -211,9 +212,25 @@ def prepare_dolt(cache, output, end, wiki_splits=None):
         OR (ticker='A' AND ex_date IN (DATE '2012-03-30',DATE '2012-06-29'))
       ORDER BY ticker,ex_date
     """).fetchall()
+    # Independent diagnostic of enormous one-day jumps in heavily traded names.
+    # Genuine market moves remain in the tape. The rank-stage audit checks the
+    # exact 20-session universe; this cheap pass checks a broader set of names.
+    big_gaps = db.execute(f"""
+      WITH large_names AS (
+        SELECT DISTINCT symbol FROM {view} WHERE turnover>1e9
+      ), bars_with_prev AS (
+        SELECT q.*,lag(q.date) OVER w AS prev_day,lag(q.close) OVER w AS prev_close
+        FROM {view} AS q SEMI JOIN large_names USING(symbol)
+        WINDOW w AS (PARTITION BY q.symbol ORDER BY q.date)
+      )
+      SELECT symbol,date,prev_day,round(close/prev_close,4) AS overnight_close_ratio,round(turnover) AS turnover
+      FROM bars_with_prev WHERE turnover>5e8 AND date-prev_day<=7
+        AND (close/prev_close>1.5 OR close/prev_close<0.5)
+      ORDER BY turnover DESC LIMIT 25
+    """).fetchall()
     metrics = dict(revision=revision, rows=stats[0],symbols=stats[1],start=str(stats[2]),end=str(stats[3]),
                    sessions=stats[4], splits=db.execute("SELECT count(*) FROM actions").fetchone()[0],
-                   example_splits=checks, upstream_dividends_sample=cash_samples)
+                   example_splits=checks, upstream_dividends_sample=cash_samples, largest_liquid_jumps=big_gaps)
     output.with_suffix(".metadata.json").write_text(json.dumps(metrics,indent=2,default=str))
     print(json.dumps(metrics,default=str),flush=True)
     db.close()

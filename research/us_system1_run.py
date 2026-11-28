@@ -7,7 +7,7 @@ import exchange_calendars as xc
 import numpy as np
 import pandas as pd
 
-from us_turtle_close import prepare, simulate_year
+from us_turtle_close import prepare, simulate_year, simulate_period
 from us_fx import year_endpoints
 
 
@@ -18,7 +18,11 @@ def assemble(dolt, early, dates, cache):
     db.register("calendar_frame", pd.DataFrame({"date": dates, "i": range(len(dates))}))
     db.execute("CREATE OR REPLACE TEMP VIEW cal AS SELECT date::DATE AS date,i FROM calendar_frame")
     for name, path in (("newer", dolt), ("older", early)):
-        db.read_parquet(str(path)).create_view(name)
+        db.read_parquet(str(path)).create_view(name + "_input")
+        if name == "older":
+            db.execute("CREATE TEMP VIEW older AS SELECT * REPLACE (CASE WHEN symbol='DELL' THEN 'DELL~2013' ELSE symbol END AS symbol) FROM older_input")
+        else:
+            db.execute("CREATE TEMP VIEW newer AS SELECT * FROM newer_input")
     # Both vendors supply split-only OHLC. Align the old adjusted basis across the
     # boundary so historical channel/ATR levels remain meaningful. Raw cash is unchanged.
     db.execute("""
@@ -122,6 +126,33 @@ def run(args):
             group.append({k:round(float(s[k]),5) for k in
                 ("year","top","ret","krw_pct","spx_krw_pct","spx_usd_pct","long_entries","short_entries","mdd","estimated_terminal")})
         print("ANNUAL",json.dumps(group),flush=True)
+    continuous=[]
+    long_run=[]
+    for top in [10,20,30]:
+        s,d,f=simulate_period(panels,2010,end.year,top,100_000_000/fx.iloc[0].fx_start,terminal_policy="last_mark")
+        for year,y in fx.iterrows():
+            cy=d[d.date.dt.year.eq(year)]
+            prior=d[d.date.lt(cy.date.min())].iloc[-1]
+            last=cy.iloc[-1]
+            continuous.append(dict(year=year,top=top,usd_pct=(last.equity/prior.equity-1)*100,
+                                   krw_pct=(last.equity*y.fx_end/(prior.equity*y.fx_start)-1)*100,
+                                   usd_final=last.equity,krw_final=last.equity*y.fx_end,
+                                   long_entries=int(((f.date.dt.year==year)&(f.reason=="entry")&(f.side==1)).sum()),
+                                   short_entries=int(((f.date.dt.year==year)&(f.reason=="entry")&(f.side==-1)).sum())))
+        balance=s["final"]*fx.iloc[-1].fx_end
+        years=(end-pd.Timestamp(fx.iloc[0].start)).days/365.2425
+        long_run.append(dict(top=top,krw_final=balance,krw_total=(balance/1e8-1)*100,
+                             krw_cagr=((balance/1e8)**(1/years)-1)*100,usd_total=s["ret"],usd_mdd=s["mdd"],
+                             long_entries=s["long_entries"],short_entries=s["short_entries"],estimated_terminal=s["estimated_terminal"]))
+        d.to_csv(out/f"continuous-daily-{top}.csv.gz",index=False)
+        f.to_csv(out/f"continuous-fills-{top}.csv.gz",index=False)
+    cont=pd.DataFrame(continuous)
+    assert len(cont)==51
+    cont.to_csv(out/"continuous-annual.csv",index=False)
+    long_stats=pd.DataFrame(long_run)
+    long_stats.to_csv(out/"continuous-summary.csv",index=False)
+    print("CONT_CSV_BEGIN\n"+cont.to_csv(index=False,float_format="%.8f")+"CONT_CSV_END",flush=True)
+    print("TOTAL_CSV_BEGIN\n"+long_stats.to_csv(index=False,float_format="%.8f")+"TOTAL_CSV_END",flush=True)
     summary=pd.DataFrame(sums)
     assert len(summary)==51 and (summary.sessions>=220).all()
     assert (summary.long_entries>0).all() and (summary.short_entries>0).all()

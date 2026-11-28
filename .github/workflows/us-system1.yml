@@ -33,8 +33,10 @@ jobs:
         run: python research/us_early.py --cache /tmp/usdata/wiki --out /tmp/usdata/early.parquet --split-out /tmp/usdata/wiki-splits.parquet
       - name: Prepare listed US securities and historical corporate actions
         run: python research/us_dolt.py /tmp/usdata/dolt.parquet --cache /tmp/usdata --wiki-splits /tmp/usdata/wiki-splits.parquet
-      - name: Rank and run 51 portfolios
-        run: python research/us_system1_run.py --dolt /tmp/usdata/dolt.parquet --early /tmp/usdata/early.parquet --out results-us
+      - name: Extend early coverage for ADRs and historical shares
+        run: python research/us_early_extra.py --early /tmp/usdata/early.parquet --dolt /tmp/usdata/dolt.parquet --cache /tmp/usdata/extra --out /tmp/usdata/early-plus.parquet
+      - name: Rank and run independent and continuous portfolios
+        run: python research/us_system1_run.py --dolt /tmp/usdata/dolt.parquet --early /tmp/usdata/early-plus.parquet --out results-us
       - uses: actions/upload-artifact@v4
         with:
           name: us-turtle-annual-2010-2026
@@ -42,4 +44,5 @@ jobs:
             results-us/*.csv
             results-us/*.csv.gz
             /tmp/usdata/dolt.metadata.json
+            /tmp/usdata/early-plus.sources.csv
           retention-days: 60
