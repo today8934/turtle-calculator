@@ -252,6 +252,12 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
         for stage, field in enumerate(phases):
             signal = np.flatnonzero(np.isfinite(events[i, stage]) & eligible_today)
             active = sorted(set(pos).union(signal), key=lambda k: (priority[i,k], order[k]))
+            watch = label.startswith("rolling_") and history[i] == pd.Timestamp("2026-04-08")
+            if watch:
+                watch_k = order.index("009150")
+                print("WATCH_PHASE", label, stage, "bar", *[m[x][i, watch_k]/m["factor"][i,watch_k] for x in ["o","h","l","c"]],
+                      "price", events[i,stage,watch_k]/m["factor"][i,watch_k], "eligible", eligible_today[watch_k],
+                      "holdings", [(names[order[j]],len(p["lots"])) for j,p in pos.items()], "cash", cash, flush=True)
             for k in active:
                 target, fac = m[field][i, k], m["factor"][i,k]
                 if not np.isfinite(target):
@@ -281,6 +287,8 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                     n = m["n"][i,k]
                     desired = math.floor(notional * .01 / (n / fac))
                     shares = min(desired, math.floor(cash / (price / fac * (1 + buy_fee))))
+                    if watch and order[k]=="009150":
+                        print("WATCH_ORDER",label,stage,"price",price/fac,"desired",desired,"affordable",shares,"cash",cash,flush=True)
                     if shares > 0 and shares == desired:
                         qty = shares / fac
                         cash -= qty * price * (1 + buy_fee)
