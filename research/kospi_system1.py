@@ -103,7 +103,7 @@ def panels(index, data, order):
             seeded.iloc[19] = tr.iloc[:20].mean()
         atr = seeded.ewm(alpha=1 / 20, adjust=False).mean()
         week = d.index.to_period("W-FRI")
-        weekly = atr.groupby(week).last()
+        weekly = atr.groupby(week).last().reindex(pd.period_range(week.min(), week.max(), freq="W-FRI")).ffill()
         n = pd.Series(weekly.reindex(week - 1).to_numpy(), index=d.index)
         pos = index.index.get_indexer(d.index)
         values = dict(o=o, h=h, l=l, c=c, factor=factor, n=n)
@@ -119,7 +119,13 @@ def panels(index, data, order):
 def breakout_events(m, reverse):
     # Track every instrument before the test begins. The previous hypothetical trade may be long or short.
     rows, cols = m["o"].shape
-    phases = ["o", "h", "l", "c"] if reverse else ["o", "l", "h", "c"]
+    if reverse == "near":
+        high_is_nearer = (m["h"] - m["o"]) < (m["o"] - m["l"])
+        m["first"] = np.where(high_is_nearer, m["h"], m["l"])
+        m["second"] = np.where(high_is_nearer, m["l"], m["h"])
+        phases = ["o", "first", "second", "c"]
+    else:
+        phases = ["o", "h", "l", "c"] if reverse else ["o", "l", "h", "c"]
     events = np.full((rows, 4, cols), np.nan)
     for k in range(cols):
         side = 0
@@ -164,7 +170,7 @@ def breakout_events(m, reverse):
 
 
 def simulate(index, m, last, order, names, priority, eligible, phases, events, label,
-             initial=CAPITAL, cap=4, buy_fee=.0005, sell_fee=.0025):
+             initial=CAPITAL, cap=4, buy_fee=.0005, sell_fee=.0025, partial=False):
     cash = equity = float(initial)
     pos, marks, ledger, curve = {}, {}, [], []
     history = index.index
@@ -195,43 +201,51 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                 hold = pos.get(k)
                 if hold is not None and falling:
                     channel = m["d10"][i,k]
-                    level = max(hold["stop"], channel)
-                    if target <= level:
+                    remaining = []
+                    for stop, qty in sorted(hold["lots"], reverse=True):
+                        level = max(stop, channel)
+                        if target > level:
+                            remaining.append((stop, qty))
+                            continue
                         px = target if gap else min(previous, level)
-                        cash += hold["qty"] * px * (1 - sell_fee)
-                        record(k, "sell", px, hold["qty"], "2N" if hold["stop"] >= channel else "10D")
+                        cash += qty * px * (1 - sell_fee)
+                        record(k, "sell", px, qty, "2N" if stop >= channel else "10D")
+                    hold["lots"] = remaining
+                    hold["qty"] = sum(q for _,q in remaining)
+                    if not remaining:
                         del pos[k]
                         hold = None
                 price = events[i, stage, k]
-                units_in_account = sum(p["units"] for p in pos.values())
+                units_in_account = sum(len(p["lots"]) for p in pos.values())
                 if hold is None and rising and eligible_today[k] and np.isfinite(price) and len(pos) < cap and units_in_account < 12:
                     n = m["n"][i,k]
                     desired = math.floor(opening_equity * .01 / (n / fac))
                     shares = min(desired, math.floor(cash / (price / fac * (1 + buy_fee))))
-                    if shares > 0:
+                    if shares > 0 and (partial or shares == desired):
                         qty = shares / fac
                         cash -= qty * price * (1 + buy_fee)
                         hold = dict(qty=qty, units=1, unit=qty, n=n, latest=price,
-                                    stop=executable(price - 2*n, fac, False))
+                                    lots=[(executable(price - 2*n, fac, False), qty)])
                         pos[k] = hold
                         record(k, "buy", price, qty, "entry")
                 if hold is None or not rising:
                     continue
-                while hold["units"] < 4 and sum(p["units"] for p in pos.values()) < 12:
+                while hold["units"] < 4 and sum(len(p["lots"]) for p in pos.values()) < 12:
                     level = executable(hold["latest"] + .5*hold["n"], fac, True)
                     if target < level:
                         break
                     px = target if gap else max(previous, level)
-                    shares = min(math.floor(hold["unit"]*fac + 1e-8), math.floor(cash / (px / fac * (1 + buy_fee))))
-                    if shares < 1:
+                    desired = math.floor(hold["unit"]*fac + 1e-8)
+                    shares = min(desired, math.floor(cash / (px / fac * (1 + buy_fee))))
+                    if shares < 1 or (not partial and shares < desired):
                         break
                     qty = shares / fac
                     cash -= qty * px * (1 + buy_fee)
                     hold["qty"] += qty
                     hold["units"] += 1
                     hold["latest"] = px
-                    # Common stop across units for this stock implementation.
-                    hold["stop"] = executable(px - 2*hold["n"], fac, False)
+                    hold["lots"] = [(executable(s + .5*hold["n"],fac,False), q) for s,q in hold["lots"]]
+                    hold["lots"].append((executable(px - 2*hold["n"],fac,False), qty))
                     record(k, "buy", px, qty, "add")
         for k in pos:
             if np.isfinite(m["c"][i,k]):
@@ -241,15 +255,26 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
         curve.append([history[i].date(), equity, cash, len(pos), index.iloc[i]])
     curve = pd.DataFrame(curve, columns=["date","equity","cash","holdings","index"])
     trades = pd.DataFrame(ledger, columns=["date","phase","code","name","action","raw_price","raw_shares","reason","cash_after"])
+    cash_changes = trades.raw_price * trades.raw_shares * np.where(trades.action.eq("sell"), 1-sell_fee, -1-buy_fee)
+    assert np.isclose(initial + cash_changes.sum(), cash, atol=.01, rtol=0)
+    attribution = cash_changes.groupby(trades.code).sum()
+    for k,p in pos.items():
+        attribution.loc[order[k]] += p["qty"] * marks[k]
+    assert np.isclose(initial + attribution.sum(), equity, atol=.01, rtol=0)
+    attribution.rename("profit_krw").sort_values(ascending=False).to_csv(OUT / f"{label}_stock_profit.csv")
     curve.to_csv(OUT / f"{label}_daily.csv", index=False)
     trades.to_csv(OUT / f"{label}_fills.csv", index=False)
     summary = dict(label=label, initial=initial, final=round(equity), ret=round((equity / initial - 1)*100, 4),
                    mdd=round((curve.equity / curve.equity.cummax() - 1).min()*100, 4),
                    entries=int(trades.reason.eq("entry").sum()), adds=int(trades.reason.eq("add").sum()),
-                   exits=int(trades.action.eq("sell").sum()), held=len(pos),
+                   exits=int(trades.reason.eq("entry").sum())-len(pos), held=len(pos),
                    delist=int(trades.reason.eq("delisting_zero_recovery").sum()),
                    exposure=round((1 - curve.cash.iloc[1:]/curve.equity.iloc[1:]).mean()*100, 2),
                    candidates=int(eligible[start + 1:].any(axis=0).sum()))
+    pit = (curve.equity / curve.equity.cummax()).idxmin()
+    peak = curve.equity.loc[:pit].idxmax()
+    summary["peak_date"], summary["trough_date"] = str(curve.date.at[peak]), str(curve.date.at[pit])
+    summary["peak_equity"], summary["trough_equity"] = round(curve.equity.at[peak]), round(curve.equity.at[pit])
     print("RESULT", json.dumps(summary), flush=True)
     return summary
 
@@ -265,12 +290,16 @@ def main():
     pre = np.broadcast_to([c in first for c in order], primary.shape)
     post = np.broadcast_to([c in final for c in order], primary.shape)
     results = []
-    for reverse in [False, True]:
+    for reverse in [False, True, "near"]:
         path, events = breakout_events(m, reverse)
         def run(name, priority, eligible, **kw):
             results.append(simulate(index,m,last,order,names,priority,eligible,path,events,name,**kw))
-        if reverse:
+        if reverse == "near":
+            run("near_extreme_first", primary, primary <= 100)
+            run("near_extreme_first_4m", primary, primary <= 100, initial=4_000_000)
+        elif reverse:
             run("high_first", primary, primary <= 100)
+            run("high_first_4m", primary, primary <= 100, initial=4_000_000)
         else:
             run("base", primary, primary <= 100)
             run("prior_day_turnover", daily, daily <= 100)
@@ -279,6 +308,7 @@ def main():
             run("no_four_name_cap", primary, primary <= 100, cap=100)
             run("gross", primary, primary <= 100, buy_fee=0., sell_fee=0.)
             run("capital_4m", primary, primary <= 100, initial=4_000_000)
+            run("allow_partial_units", primary, primary <= 100, partial=True)
     pd.DataFrame(results).to_csv(OUT / "summary.csv", index=False)
 
 
