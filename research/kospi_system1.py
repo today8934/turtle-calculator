@@ -275,15 +275,20 @@ def executable_stop(stop, factor, up, old, strict, etf=False):
 def simulate(index, m, last, order, names, priority, eligible, phases, events, label, correlations,
              buy_fee=.0005, sell_fee=.0025, retry=False, align_dec19=None, closing_auction=False,
              open_stages=(0,), start_date=START, intraday_exit=None, etf_sell_fee=.0005,
-             market_gate=None, force_flat_on_gate=False):
+             market_gate=None, force_flat_on_gate=False, stock_entry_gate=None, gate_adds=True):
     if market_gate is not None:
         market_gate = np.asarray(market_gate)
         if market_gate.shape != (len(index),) or market_gate.dtype != np.bool_:
             raise ValueError("market_gate must contain one boolean per session")
-        if not closing_auction or tuple(phases)!=("c","c") or intraday_exit or align_dec19 is not None or retry:
-            raise ValueError("market_gate requires close-only execution")
     elif force_flat_on_gate:
         raise ValueError("forced close requires a market gate")
+    if stock_entry_gate is not None:
+        stock_entry_gate = np.asarray(stock_entry_gate)
+        if stock_entry_gate.shape != (len(index), len(order)) or stock_entry_gate.dtype != np.bool_:
+            raise ValueError("stock_entry_gate must contain one boolean per session and instrument")
+    if market_gate is not None or stock_entry_gate is not None:
+        if not closing_auction or tuple(phases)!=("c","c") or intraday_exit or align_dec19 is not None or retry:
+            raise ValueError("market and stock gates require close-only execution")
     initial = CAPITAL
     cash = equity = float(initial)
     annual_base = notional = float(initial)
@@ -386,6 +391,8 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                         del pos[k]
                         hold = None
                 if not allow_risk:
+                    continue
+                if stock_entry_gate is not None and not stock_entry_gate[i,k] and (hold is None or gate_adds):
                     continue
                 price = events[i, stage, k]
                 if hold is None and rising and eligible_today[k] and np.isfinite(price) and room(k, pos, correlations[i]):

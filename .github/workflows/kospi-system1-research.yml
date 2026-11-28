@@ -1,4 +1,4 @@
-name: KOSPI closing-price SMA100 comparison
+name: Individual stock SMA100 closing-price comparison
 on:
   push:
     branches: [research/kospi-system1-20261127]
@@ -28,10 +28,10 @@ jobs:
           github-token: ${{ github.token }}
           name: kospi-annual-close-2010-2019
           path: reference
-      - name: Compare three closing-price cash equity policies
-        run: python -u research/kospi_close_sma100.py
+      - name: Compare issuer-specific 100-day averages at stock closes
+        run: python -u research/kospi_close_sma100.py --stock-sma100
       - uses: actions/upload-artifact@v4
         with:
-          name: kospi-close-sma100-comparison
+          name: kospi-close-stock-sma100-comparison
           path: output/
           if-no-files-found: ignore

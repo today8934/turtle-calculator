@@ -1,4 +1,5 @@
 """Compare close-only cash long stock trades with and without the KOSPI SMA100 gate."""
+import argparse
 import json
 from pathlib import Path
 
@@ -20,7 +21,7 @@ def payoff_and_audit(label, quotes, gate, mode, expected):
     print_dates = pd.MultiIndex.from_frame(trades[["date","code"]])
     np.testing.assert_allclose(trades.raw_price, quotes.reindex(print_dates), rtol=0, atol=.00001)
     buys = trades.action.eq("buy").to_numpy()
-    if mode!="original":
+    if gate is not None and mode!="original":
         assert gate.reindex(trades.date[buys]).all()
     assert trades.loc[buys,"phase"].eq(1).all() and trades.loc[~buys,"phase"].eq(0).all()
     assert not trades.loc[buys].duplicated(["code","date"]).any()
@@ -52,7 +53,23 @@ def payoff_and_audit(label, quotes, gate, mode, expected):
                 index_exit_fills=int(trades.reason.eq("index_exit").sum()))
 
 
-def main():
+def stock_filter(index, universe, matrices):
+    close = pd.DataFrame(matrices["c"],index=index.index,columns=universe)
+    avg = pd.DataFrame(np.nan,index=index.index,columns=universe)
+    threshold = avg.copy()
+    for code in universe:
+        valid = close[code].dropna()
+        avg.loc[valid.index,code] = valid.rolling(100,min_periods=100).mean()
+        threshold.loc[valid.index,code] = valid.shift().rolling(99,min_periods=99).mean()
+    # close[t] > SMA100[t] iff close[t] exceeds the mean of the previous 99 closes.
+    # Guard equality against floating-point error in corporate-action-adjusted prices.
+    tol = 1e-9 * pd.DataFrame(matrices["factor"],index=index.index,columns=universe)
+    eligible = (close-threshold).gt(tol)
+    np.testing.assert_array_equal(eligible, (close-avg).gt(tol*0.99))
+    return eligible,avg
+
+
+def main(stock=False):
     index, market, ranks, names, _ = market_data(range(2008,2020),pd.Timestamp("2009-12-30"),pd.Timestamp("2019-12-30"))
     cents = (100*index).round().astype("int64")
     np.testing.assert_allclose(cents/100,index,atol=.00001,rtol=0)
@@ -68,6 +85,12 @@ def main():
     quotes = market[market.Code.isin(universe)]
     raw = quotes.set_index(["Date","Code"]).Close
     m,last,_ = panels(index,quotes,universe)
+    if stock:
+        name_eligible,stock_sma = stock_filter(index,universe,m)
+        avg_lookup = stock_sma.stack()
+        adj_lookup = pd.DataFrame(m["c"],index=index.index,columns=universe).stack()
+        allowed_lookup = name_eligible.stack()
+        prior_market = pd.read_csv("research/results/kospi_close_sma100_2010_2019.csv").set_index(["year","top","mode"])
     shadow = close_signals(m,index.index)
     old = pd.read_csv("reference/calendar_summary.csv").set_index(["year","size"])
     stocks_only = pd.read_csv("research/results/kospi_system1_intraday_2010_2019.csv").groupby(["year","turnover_top"]).prior_close_long_return_pct.first()
@@ -88,13 +111,32 @@ def main():
         for size in SIZES:
             eligible = rank.loc[:,codes].le(size).to_numpy()
             assert (eligible[local.index>start].sum(axis=1)==size).all()
-            for mode in ("original","entry_gate","flatten"):
+            if stock:
+                tradable = name_eligible.loc[local.index,codes].to_numpy()
+                candidate = np.isfinite(events[:,1,:]) & eligible & (local.index>start)[:,None]
+                has_history = stock_sma.loc[local.index,codes].notna().to_numpy()
+                signal_days = int(candidate.sum())
+                passed = int((candidate & tradable).sum())
+                insufficient_history = int((candidate & ~has_history).sum())
+            modes = ("original","stock_entry","stock_entry_add") if stock else ("original","entry_gate","flatten")
+            for mode in modes:
                 label = f"close_{mode}_{year}_top{size}"
                 row = simulate(local,values,last[cols]-begin,codes,names,priority,eligible,("c","c"),
                                events,label,corr,closing_auction=True,start_date=start,
-                               market_gate=None if mode=="original" else can_trade,
-                               force_flat_on_gate=mode=="flatten")
-                metrics = payoff_and_audit(label,raw,gate,mode,row)
+                               market_gate=can_trade if not stock and mode!="original" else None,
+                               force_flat_on_gate=mode=="flatten",
+                               stock_entry_gate=tradable if stock and mode!="original" else None,
+                               gate_adds=mode!="stock_entry")
+                metrics = payoff_and_audit(label,raw,None if stock else gate,mode,row)
+                if stock and mode!="original":
+                    fills = pd.read_csv(OUT/f"{label}_fills.csv",dtype={"code":str},parse_dates=["date"])
+                    checked = fills.loc[fills.reason.isin(["entry","add"] if mode=="stock_entry_add" else ["entry"])]
+                    keys = pd.MultiIndex.from_frame(checked[["date","code"]])
+                    assert allowed_lookup.reindex(keys).all()
+                    assert (adj_lookup.reindex(keys).to_numpy()>avg_lookup.reindex(keys).to_numpy()).all()
+                    if mode=="stock_entry":
+                        keys = pd.MultiIndex.from_frame(fills.loc[fills.reason.eq("add"),["date","code"]])
+                        entry_only_adds_below = int((~allowed_lookup.reindex(keys)).sum())
                 if mode=="original":
                     baseline = row["ret"]
                     keys = ["ret","mdd","final","entries","adds","exits","traded","held"]
@@ -103,14 +145,22 @@ def main():
                 data = dict(year=year,top=size,mode=mode,eligible_days=int(by_year.at[year]),sessions=len(days),
                             kospi_pct=benchmark,return_pct=row["ret"],improvement_pp=row["ret"]-baseline,
                             mdd_pct=row["mdd"],entries=row["entries"],adds=row["adds"],exposure_pct=row["exposure"],**metrics)
+                if stock:
+                    del data["eligible_days"]
+                    data.update(signal_candidates=signal_days,signals_passing_stock_sma=passed,
+                                signals_without_sma=insufficient_history,
+                                index_gate_return_pct=prior_market.at[(year,size,"entry_gate"),"return_pct"],
+                                adds_below_sma_if_ungated=entry_only_adds_below if mode=="stock_entry" else None)
                 rows.append(data)
     out = pd.DataFrame(rows).round(6)
     assert len(out)==90 and not out.duplicated(["year","top","mode"]).any()
-    out.to_csv(OUT/"calendar_close_sma100.csv",index=False)
+    out.to_csv(OUT/("calendar_close_stock_sma100.csv" if stock else "calendar_close_sma100.csv"),index=False)
     print("CLOSE_FILTER_FIELDS",",".join(out.columns))
     for row in out.to_numpy().tolist():
         print("CLOSE_FILTER_ROW",json.dumps([None if pd.isna(x) else x for x in row],separators=(",",":")))
 
 
 if __name__ == "__main__":
-    main()
+    args = argparse.ArgumentParser()
+    args.add_argument("--stock-sma100",action="store_true")
+    main(args.parse_args().stock_sma100)
