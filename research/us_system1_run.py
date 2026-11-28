@@ -39,12 +39,12 @@ def assemble(dolt, early, dates, cache):
     db.execute("""
        CREATE OR REPLACE TEMP VIEW all_quotes AS
        SELECT n.date::DATE AS date,n.symbol,n.high,n.low,n.close,n.raw_close,n.turnover,
-              n.dividend,n.eligible FROM newer n WHERE n.date>=DATE '2011-01-01'
+              0.0::DOUBLE AS dividend,n.eligible FROM newer n WHERE n.date>=DATE '2011-01-01'
        UNION ALL
        SELECT o.date::DATE AS date,
               CASE WHEN b.raw_ratio BETWEEN .95 AND 1.05 THEN o.symbol ELSE o.symbol||'@WIKI' END AS symbol,
               o.high*coalesce(b.ratio,1),o.low*coalesce(b.ratio,1),o.close*coalesce(b.ratio,1),
-              o.raw_close,o.turnover,o.dividend,o.eligible
+              o.raw_close,o.turnover,0.0::DOUBLE,o.eligible
        FROM older o LEFT JOIN bridge b USING(symbol) WHERE o.date<DATE '2011-01-01'
     """)
     # Assign one exact exchange-session number to each day; require all 20 prior
@@ -53,7 +53,7 @@ def assemble(dolt, early, dates, cache):
     db.execute("""
         CREATE OR REPLACE TABLE base AS
         SELECT c.i,q.* FROM all_quotes q JOIN cal c USING(date)
-        WHERE q.high>0 AND q.low>0 AND q.close>0 AND q.raw_close>0 AND q.eligible
+        WHERE q.high>0 AND q.low>0 AND q.close>0 AND q.raw_close>0 AND q.turnover>0 AND q.high>=q.close AND q.low<=q.close AND q.eligible
     """)
     dup = db.execute("SELECT symbol,date FROM base GROUP BY ALL HAVING count(*)>1 LIMIT 1").fetchall()
     if dup:
@@ -88,6 +88,10 @@ def assemble(dolt, early, dates, cache):
         LEFT JOIN winners w ON b.symbol=w.symbol AND b.i=w.i ORDER BY b.symbol,b.date
     """).fetchdf()
     print("RANKED", len(frame), frame.symbol.nunique(), frame.date.min(),frame.date.max(),flush=True)
+    frame["move"]=frame.groupby("symbol",sort=False).close.pct_change(fill_method=None)
+    extremes=frame.loc[frame["rank"].le(30) & frame.move.abs().gt(.50),["date","symbol","rank","move"]].sort_values("move")
+    print("EXTREMES",extremes.to_json(orient="records",date_format="iso"),flush=True)
+    extremes.to_csv(cache/"ranked-price-outliers.csv",index=False)
     db.close()
     return frame,checks
 

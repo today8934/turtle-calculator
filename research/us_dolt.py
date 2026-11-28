@@ -1,6 +1,5 @@
 """Prepare the publicly maintained DoltHub US equity tape for a closing-price backtest."""
 import argparse
-import csv
 import datetime as dt
 import json
 import os
@@ -63,7 +62,7 @@ def export_tables(cache):
     return revision
 
 
-def prepare_dolt(cache, output, end):
+def prepare_dolt(cache, output, end, wiki_splits=None):
     cache = Path(cache).resolve()
     cache.mkdir(exist_ok=True, parents=True)
     output = Path(output).resolve()
@@ -97,6 +96,26 @@ def prepare_dolt(cache, output, end):
           ) eligible
         FROM symbol_src
     """)
+    db.execute("""
+        CREATE TEMP TABLE declared AS
+        SELECT act_symbol ticker, CAST(ex_date AS DATE) ex_date,
+            try_cast(to_factor AS DOUBLE)/nullif(try_cast(for_factor AS DOUBLE),0) ratio
+        FROM split_src
+    """)
+    if wiki_splits:
+        # WIKI's contemporary splits cover the first three years of the market
+        # tape. In later years they also fill gaps in the Dolt event records.
+        # Ticker/date proximity suppresses vendor duplicates on adjacent dates.
+        db.execute(f"""
+          INSERT INTO declared
+          SELECT m.ticker,CAST(w.ex_date AS DATE),CAST(w.ratio AS DOUBLE)
+          FROM read_parquet({sql_literal(Path(wiki_splits).resolve())}) w JOIN master m
+            ON replace(m.ticker,'.','-')=w.symbol
+          ANTI JOIN declared d ON m.ticker=d.ticker AND
+               abs(CAST(w.ex_date AS DATE)-d.ex_date)<=5 AND
+               abs(CAST(w.ratio AS DOUBLE)-d.ratio)<0.0001
+          WHERE w.ratio>0 AND w.ratio<>1
+        """)
     print("Building classified, verified daily bars", flush=True)
     # FB was the Meta stock before the later ETF reused the ticker. META was
     # itself a former ETF ticker. Preserve this corporate rename across dates.
@@ -128,9 +147,7 @@ def prepare_dolt(cache, output, end):
     db.execute(f"""
       CREATE TEMP TABLE actions AS
       WITH known AS (
-        SELECT act_symbol ticker, CAST(ex_date AS DATE) ex_date,
-          try_cast(to_factor AS DOUBLE)/nullif(try_cast(for_factor AS DOUBLE),0) ratio
-        FROM split_src WHERE CAST(ex_date AS DATE)<=DATE '{end}'
+        SELECT * FROM declared WHERE ex_date<=DATE '{end}'
       ), candidate AS (
         SELECT k.ticker, k.ex_date, k.ratio, b.date day, b.symbol,
                b.open, prev.close prior, abs(ln(prev.close/b.open/k.ratio)) error,
@@ -182,10 +199,21 @@ def prepare_dolt(cache, output, end):
         for stock, expected_date, ratio in (("AAPL","2014-06-09",7),("AAPL","2020-08-31",4),("NVDA","2024-06-10",10)):
             if not any(s==stock and str(d)==expected_date and abs(r-ratio)<0.001 for s,d,r in checks):
                 raise RuntimeError(f"Split validation failed for {stock} {expected_date}. Observed {checks}")
+    if wiki_splits and end >= "2011-05-09":
+        prior = db.execute("SELECT ratio FROM actions WHERE symbol='C' AND day=DATE '2011-05-09'").fetchall()
+        if not any(abs(row[0]-0.1)<0.001 for row in prior):
+            raise RuntimeError(f"Missing Citigroup 1-for-10 reverse split on 2011-05-09: {prior}")
     partial.replace(output)
+    cash_samples = db.execute("""
+      SELECT ticker,ex_date,amount FROM distributions WHERE
+        (ticker='AAPL' AND ex_date IN (DATE '2014-05-08',DATE '2014-08-07'))
+        OR (ticker='NVDA' AND ex_date BETWEEN DATE '2021-03-01' AND DATE '2021-12-31')
+        OR (ticker='A' AND ex_date IN (DATE '2012-03-30',DATE '2012-06-29'))
+      ORDER BY ticker,ex_date
+    """).fetchall()
     metrics = dict(revision=revision, rows=stats[0],symbols=stats[1],start=str(stats[2]),end=str(stats[3]),
                    sessions=stats[4], splits=db.execute("SELECT count(*) FROM actions").fetchone()[0],
-                   example_splits=checks)
+                   example_splits=checks, upstream_dividends_sample=cash_samples)
     output.with_suffix(".metadata.json").write_text(json.dumps(metrics,indent=2,default=str))
     print(json.dumps(metrics,default=str),flush=True)
     db.close()
@@ -197,5 +225,6 @@ if __name__ == "__main__":
     p.add_argument("output")
     p.add_argument("--cache", default="us-cache/dolt")
     p.add_argument("--end", default="2026-11-27")
+    p.add_argument("--wiki-splits", help="Optional WIKI actions (symbol,ex_date,ratio) to extend early coverage")
     args = p.parse_args()
-    prepare_dolt(args.cache, args.output, args.end)
+    prepare_dolt(args.cache, args.output, args.end, wiki_splits=args.wiki_splits)

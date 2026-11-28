@@ -22,7 +22,7 @@ jobs:
             dolt clone post-no-preference/stocks stocks
           fi
           cd stocks
-          dolt rev-parse HEAD
+          dolt log -n 1
           dolt sql -q "select * from ohlcv where date IN ('2014-06-06','2014-06-09','2024-06-07','2024-06-10') and act_symbol in ('AAPL','NVDA') order by act_symbol,date"
           dolt sql -q "select * from dividend where act_symbol='AAPL' order by ex_date desc limit 3"
           du -sh .

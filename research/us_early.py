@@ -95,27 +95,56 @@ def _batches(source):
         yield from pd.read_csv(source, chunksize=250_000, usecols=lambda col: _canonical(col) in FIELDS)
 
 
-def _read_window(source, start, end):
+def _symbol(values):
+    return (values.astype(str).str.upper().str.strip().str.replace(r"^WIKI/", "", regex=True)
+            .str.replace(r"[._/]", "-", regex=True))
+
+
+def _read_window(source, start, end, split_out):
     parts = []
+    events = []
     for rows in _batches(source):
         rows = rows.rename(columns=_canonical)
         missing = FIELDS.difference(rows.columns)
         if missing:
             raise ValueError(f"Missing raw fields in {source.name}: {sorted(missing)}")
         rows["date"] = pd.to_datetime(rows["date"]).dt.normalize()
+        if split_out is not None:
+            split = pd.to_numeric(rows["split_ratio"], errors="raise")
+            event = split.notna() & split.ne(1) & rows.date.between("2011-01-01", "2018-03-27")
+            if event.any():
+                found = rows.loc[event, ["symbol", "date"]].copy()
+                found["ratio"] = split.loc[event]
+                found["symbol"] = _symbol(found.symbol)
+                events.append(found.rename(columns={"date": "ex_date"}))
         rows = rows[rows.date.between(start, end)]
         if not rows.empty:
             parts.append(rows.copy())
     if not parts:
         raise ValueError(f"No WIKI price records from {start} through {end}")
+    if split_out is not None:
+        events = pd.concat(events, ignore_index=True) if events else pd.DataFrame({
+            "symbol": pd.Series(dtype="str"), "ex_date": pd.Series(dtype="datetime64[ns]"),
+            "ratio": pd.Series(dtype="float64")})
+        if (events.duplicated(["symbol", "ex_date"]).any() or
+                not (np.isfinite(events.ratio) & events.ratio.gt(0)).all()):
+            raise ValueError("Duplicate or invalid WIKI split events")
+        events = events.sort_values(["symbol", "ex_date"])
+        split_out = Path(split_out)
+        split_out.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=split_out.parent, delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            events.to_parquet(tmp, index=False)
+            tmp.replace(split_out)
+        finally:
+            tmp.unlink(missing_ok=True)
     return pd.concat(parts, ignore_index=True)
 
 
 def _split_prices(data):
     data = data.copy()
-    data["symbol"] = (data.symbol.astype(str).str.upper().str.strip()
-                      .str.replace(r"^WIKI/", "", regex=True)
-                      .str.replace(r"[._/]", "-", regex=True))
+    data["symbol"] = _symbol(data.symbol)
     data = data.sort_values(["symbol", "date"]).reset_index(drop=True)
     if data.duplicated(["symbol", "date"]).any():
         raise ValueError("Duplicate (symbol, date) in WIKI")
@@ -141,13 +170,15 @@ def _split_prices(data):
     return data[mask].reset_index(drop=True)
 
 
-def load_wiki(cache, start="2008-01-01", end="2011-06-30", source=None):
+def load_wiki(cache, start="2008-01-01", end="2011-06-30", source=None, split_out=None):
     """Read date-inclusive raw trades and split-only OHLCV in end-date share units.
 
     Returns date,symbol,open,high,low,close,volume,raw_close,raw_volume,turnover,
     dividend,split_ratio,eligible. turnover is estimated by raw close times raw
     share volume. Dividend is dollars per historical share on its ex-date.
     Pass an existing WIKI CSV, Parquet or Kaggle ZIP as source to work offline.
+    split_out optionally receives all WIKI split events in 2011-03/2018 (through
+    March 27, 2018), independent of the price window, in the same streaming pass.
     """
     cache = Path(cache)
     cache.mkdir(parents=True, exist_ok=True)
@@ -155,11 +186,11 @@ def load_wiki(cache, start="2008-01-01", end="2011-06-30", source=None):
     if not start <= end <= pd.Timestamp("2018-03-27"):
         raise ValueError("WIKI requires start <= end <= 2018-03-27")
     out = cache / f"wiki-split-only-v1-{start.date()}-{end.date()}.parquet"
-    if source is None and out.exists():
+    if source is None and out.exists() and (split_out is None or Path(split_out).exists()):
         return pd.read_parquet(out)
     original = Path(source) if source else _download(cache)
     table = _prices_file(cache, original)
-    frame = _split_prices(_read_window(table, start, end))
+    frame = _split_prices(_read_window(table, start, end, split_out))
     if source is None:
         with tempfile.NamedTemporaryFile(dir=cache, delete=False) as handle:
             tmp = Path(handle.name)
@@ -178,8 +209,10 @@ if __name__ == "__main__":
     parser.add_argument("--start", default="2008-01-01")
     parser.add_argument("--end", default="2011-06-30")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--split-out", type=Path,
+                        help="Output Parquet for splits from January 2011 through March 2018")
     opts = parser.parse_args()
-    prices = load_wiki(opts.cache, opts.start, opts.end, opts.source)
+    prices = load_wiki(opts.cache, opts.start, opts.end, opts.source, opts.split_out)
     opts.out.parent.mkdir(parents=True, exist_ok=True)
     prices.to_parquet(opts.out, index=False)
     print(f"WIKI: {len(prices):,} valid bars, {prices.symbol.nunique():,} names, "

@@ -30,9 +30,9 @@ jobs:
           path: /tmp/usdata/wiki/quandl-wiki-prices-us-equites.zip
           key: us-wiki-snapshot-v1
       - name: Prepare early split-only OHLC and corporate actions
-        run: python research/us_early.py --cache /tmp/usdata/wiki --out /tmp/usdata/early.parquet
+        run: python research/us_early.py --cache /tmp/usdata/wiki --out /tmp/usdata/early.parquet --split-out /tmp/usdata/wiki-splits.parquet
       - name: Prepare listed US securities and historical corporate actions
-        run: python research/us_dolt.py /tmp/usdata/dolt.parquet --cache /tmp/usdata
+        run: python research/us_dolt.py /tmp/usdata/dolt.parquet --cache /tmp/usdata --wiki-splits /tmp/usdata/wiki-splits.parquet
       - name: Rank and run 51 portfolios
         run: python research/us_system1_run.py --dolt /tmp/usdata/dolt.parquet --early /tmp/usdata/early.parquet --out results-us
       - uses: actions/upload-artifact@v4
