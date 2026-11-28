@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
 import argparse
+from io import StringIO
 import json
 import shutil
 
@@ -45,7 +46,7 @@ def identify(db, sessions):
     """).fetchdf()
 
 
-def normalize_quote(h, left, right, sleft, sright, context):
+def normalize_quote(h, left, right, sleft, sright, context, raw_donor=False):
     """Return native OHLC/raw/turnover, or a diagnostic string."""
     if h is None or sleft is None or sright is None:
         return "missing_source_or_anchor"
@@ -62,7 +63,17 @@ def normalize_quote(h, left, right, sleft, sright, context):
         return "invalid_native_anchor"
     if abs(raw[0]/raw[1]-1)>.006 or abs(adj[0]/adj[1]-1)>.006:
         return "price_basis_or_identity_disagreement"
-    if np.max(np.abs(liquid-1))>.35:
+    if raw_donor:
+        # These sources explicitly report historical USD/share and share count.
+        # One partial-tape volume outlier on an anchor can be tolerated only
+        # when surrounding actual-volume observations establish the same units.
+        neighboring_ratio = [q.turnover/(s["close"]*s["volume"]) for q,s in context
+                             if s is not None and s["close"]>0 and s["volume"]>0]
+        if (np.max(abs(raw-1))>.006 or len(neighboring_ratio)<4
+                or np.median(abs(np.asarray(neighboring_ratio)-1))>.25
+                or np.median(abs(liquid-1))>.5):
+            return "raw_usd_or_volume_units_disagree"
+    elif np.max(np.abs(liquid-1))>.35:
         return "volume_basis_disagreement"
     stable = [native.raw_close/src["close"] for native,src in context
               if src is not None and np.isfinite(src["close"]) and src["close"]>0]
@@ -71,12 +82,13 @@ def normalize_quote(h, left, right, sleft, sright, context):
     # Exact split-only basis is constant between surrounding native dates.
     # Median calibrates absolute units across vendors; round the historical
     # raw close to a tradable quote increment, not the adjusted indicators.
-    rawpx = float(h["close"]*np.median(raw))
+    rawpx = float(h["close"] * (1. if raw_donor else np.median(raw)))
     rawpx = round(rawpx,2 if rawpx>=1 else 4)
     native_factor = np.median([left.close/left.raw_close,right.close/right.raw_close])
     price = rawpx*native_factor
-    hi = max(float(h["high"]*np.median(adj)),price)
-    lo = min(float(h["low"]*np.median(adj)),price)
+    factor = native_factor if raw_donor else np.median(adj)
+    hi = max(float(h["high"]*factor),price)
+    lo = min(float(h["low"]*factor),price)
     return (hi,lo,price,rawpx,float(h["close"]*h["volume"]))
 
 
@@ -114,7 +126,48 @@ def recent_symbol(cache, sym):
     return frame
 
 
-def repair(inp,out,cache,dividends=None):
+def wiki_raw(db, source):
+    from us_early import _canonical
+    path=Path(source)
+    if path.is_dir():
+        paths=sorted(p for p in path.glob("wiki-price-table.*") if p.suffix.lower() in
+                     (".parquet",".csv",".pq"))
+        if len(paths)!=1:
+            raise ValueError(f"Expected one extracted WIKI price table: {paths}")
+        path=paths[0]
+    reader="read_csv_auto" if path.suffix.lower()==".csv" else "read_parquet"
+    rel=f"{reader}({sqlval(path.as_posix())})"
+    raw={_canonical(c[0]):'q."'+c[0].replace('"','""')+'"' for c in db.execute(
+        f"DESCRIBE SELECT * FROM {rel}").fetchall()}
+    cols=", ".join(f"{raw[c]}::DOUBLE AS {c}" for c in ("high","low","close","volume"))
+    symbol=f"upper(replace(replace(replace({raw['symbol']}, 'WIKI/',''),'.','-'),'_','-'))"
+    symbol=f"CASE {symbol} WHEN 'FB' THEN 'META' WHEN 'BBRY' THEN 'RIMM' ELSE {symbol} END"
+    return db.execute(f"""SELECT a.symbol,a.date,{cols} FROM {rel} q JOIN needed_index a
+         ON {symbol}=a.symbol AND {raw['date']}::DATE=a.date""").fetchdf()
+
+
+def kibot_raw(sym, start, end):
+    import requests
+    args=dict(action="history",symbol=sym,interval="daily",startdate=start.strftime("%m/%d/%Y"),
+              enddate=end.strftime("%m/%d/%Y"),unadjusted="1",user="guest",password="guest")
+    try:
+        resp=requests.get("https://api.kibot.com/",params=args,timeout=(5,12))
+        if resp.status_code!=200:
+            return None
+        data=pd.read_csv(StringIO(resp.text),header=None)
+        if data.shape[1] not in (6,7):
+            return None
+        data.columns=(["date","time"] if data.shape[1]==7 else ["date"]) + ["open","high","low","close","volume"]
+        data["date"]=pd.to_datetime(data.date,errors="coerce")
+        data["symbol"]=sym
+        numeric=["high","low","close","volume"]
+        data[numeric]=data[numeric].apply(pd.to_numeric,errors="coerce")
+        return data[["symbol","date",*numeric]].dropna()
+    except (ValueError,pd.errors.ParserError,requests.RequestException):
+        return None
+
+
+def repair(inp,out,cache,dividends=None,wiki_source=None):
     inp,out,cache=Path(inp),Path(out),Path(cache)
     cache.mkdir(parents=True,exist_ok=True)
     out.parent.mkdir(parents=True,exist_ok=True)
@@ -128,7 +181,7 @@ def repair(inp,out,cache,dividends=None):
     need=set()
     tasks=[]
     for row in holes.itertuples(index=False):
-        for i in range(max(0,row.left_i-3),min(len(sessions),row.right_i+4)):
+        for i in range(max(0,row.left_i-10),min(len(sessions),row.right_i+11)):
             need.add((row.symbol,sessions[i]))
         for i in range(row.left_i+1,row.right_i):
             tasks.append((row.symbol,i,row.left_i,row.right_i,row.local_adv,row.local_peak))
@@ -152,7 +205,7 @@ def repair(inp,out,cache,dividends=None):
         ds.loc[(ds.symbol=="FB") & ds.date.between("2012-05-18","2022-06-08"),"symbol"]="META"
         dividends_by_day=ds.groupby(["symbol","date"]).amount.sum().to_dict()
 
-    def apply(src,label):
+    def apply(src,label,raw_donor=False):
         if src is None or src.empty:
             return
         src["date"]=pd.to_datetime(src.date)
@@ -166,9 +219,10 @@ def repair(inp,out,cache,dividends=None):
             if key in added or key not in source:
                 continue
             ka,kb=(sym,sessions[a]),(sym,sessions[b])
-            near=[(sym,sessions[j]) for j in range(max(0,a-3),min(len(sessions),b+4))]
+            look=10 if raw_donor else 3
+            near=[(sym,sessions[j]) for j in range(max(0,a-look),min(len(sessions),b+look+1))]
             ctx=[(native[k],source[k]) for k in near if k in native and k in source]
-            ans=normalize_quote(source[key],native[ka],native[kb],source.get(ka),source.get(kb),ctx)
+            ans=normalize_quote(source[key],native[ka],native[kb],source.get(ka),source.get(kb),ctx,raw_donor)
             if isinstance(ans,str):
                 notes[key]=label+":"+ans
                 continue
@@ -178,6 +232,8 @@ def repair(inp,out,cache,dividends=None):
             notes[key]=label
         print(f"Corroborated {len(added)} total gaps after {label}",flush=True)
 
+    if wiki_source:
+        apply(wiki_raw(db,wiki_source),"WIKI-raw",True)
     shards=[f"train-{i:05d}-of-00004.parquet" for i in range(4)]
     with ThreadPoolExecutor(max_workers=4) as pool:
         hex_files=list(pool.map(lambda name:fetch(f"{HEX_BASE}/{name}",cache/name),shards))
@@ -198,6 +254,21 @@ def repair(inp,out,cache,dividends=None):
         parts=[v for v in pool.map(lambda symbol:recent_symbol(cache,symbol),recent) if v is not None]
     if parts:
         apply(pd.concat(parts,ignore_index=True).merge(ni,on=["symbol","date"]),"AmirTrader")
+    # A separate feed with genuine unadjusted prints for the largest remaining
+    # holes since WIKI ceased publication. Cap the guest requests explicitly.
+    missing=[(sym,sessions[i],adv) for sym,i,a,b,adv,peak in tasks
+             if (sym,sessions[i]) not in added and sessions[i]>pd.Timestamp("2018-03-27")]
+    if missing:
+        latest=pd.DataFrame(missing,columns=["symbol","date","adv"])
+        priority=latest.groupby("symbol").adv.max().nlargest(10).index
+        ext=[]
+        for symbol in priority:
+            window=latest.loc[latest.symbol.eq(symbol),"date"]
+            part=kibot_raw(symbol,window.min()-pd.Timedelta(days=35),window.max()+pd.Timedelta(days=35))
+            if part is not None:
+                ext.append(part)
+        if ext:
+            apply(pd.concat(ext,ignore_index=True).merge(ni,on=["symbol","date"]),"Kibot-raw",True)
     rows=[]
     for sym,i,a,b,adv,peak in tasks:
         key=(sym,sessions[i])
@@ -229,5 +300,6 @@ if __name__=="__main__":
     p.add_argument("--output",required=True)
     p.add_argument("--cache",default="cache/us-gap-repair")
     p.add_argument("--dividends",help="Source Dolt dividend CSV")
+    p.add_argument("--wiki-source",help="Extracted WIKI raw price table or its directory")
     a=p.parse_args()
-    repair(a.input,a.output,a.cache,a.dividends)
+    repair(a.input,a.output,a.cache,a.dividends,a.wiki_source)

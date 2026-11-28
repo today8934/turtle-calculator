@@ -34,7 +34,9 @@ jobs:
       - name: Prepare listed US securities and historical corporate actions
         run: python research/us_dolt.py /tmp/usdata/dolt.parquet --cache /tmp/usdata --wiki-splits /tmp/usdata/wiki-splits.parquet
       - name: Corroborate missing liquid-stock quotes with separate histories
-        run: python research/us_gap_repair.py --input /tmp/usdata/dolt.parquet --output /tmp/usdata/dolt-repaired.parquet --cache /tmp/usdata/gaps --dividends /tmp/usdata/dividend.csv
+        run: python research/us_gap_repair.py --input /tmp/usdata/dolt.parquet --output /tmp/usdata/dolt-repaired.parquet --cache /tmp/usdata/gaps --dividends /tmp/usdata/dividend.csv --wiki-source /tmp/usdata/wiki
+      - name: Restore verified parent stock bars on key distribution dates
+        run: python research/us_action_quotes.py /tmp/usdata/dolt-repaired.parquet
       - name: Extend early coverage for ADRs and historical shares
         run: python research/us_early_extra.py --early /tmp/usdata/early.parquet --dolt /tmp/usdata/dolt.parquet --cache /tmp/usdata/extra --out /tmp/usdata/early-plus.parquet
       - name: Rank and run independent and continuous portfolios

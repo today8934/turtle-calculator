@@ -73,7 +73,7 @@ def apply_spinoffs(frame, dolt_parquet, audit_path=None):
             ON p.act_symbol=r.child AND try_cast(p.date AS DATE)=r.date
         """).fetchdf()
         child_prices=pd.concat([child_prices.dropna(subset=["raw_close"]),extra],ignore_index=True)
-    db.close()
+    # Keep the local price tape open for independent cash-mark verification.
     values = {(pd.Timestamp(d),s):float(v) for d,s,v in child_prices.itertuples(index=False)
               if pd.notna(v) and v>0}
     # Independently reported unadjusted first regular closes for these two
@@ -81,6 +81,42 @@ def apply_spinoffs(frame, dolt_parquet, audit_path=None):
     values.setdefault((pd.Timestamp("2011-01-04"),"MMI"),33.12)
     values.setdefault((pd.Timestamp("2014-04-03"),"GOOG"),569.74)
     values.setdefault((pd.Timestamp("2022-08-22"),"APE"),6.00)
+    # Confirmed first regular-session closes for securities absent from the
+    # tape on the distribution day. These are market closes, not issue prices.
+    verified_marks={
+        ("2012-10-02","KRFT"):(45.42,"https://www.mondelezinternational.com/assets/PDFs/2--report-of-organizational-actions-affecting-basis-of-securities-form-8937.pdf"),
+        ("2019-04-02","DOW"):(56.25,"https://www.icis.com/explore/resources/news/2019/04/02/10343172/us-dow-chemical-rises-5-14-on-first-day-of-trading/"),
+        ("2021-11-04","KD"):(26.38,"https://www.ibm.com/investor/att/pdf/Form-8937-Report-of-Organizational-Actions-Affecting-Basis-of-Securities.pdf"),
+        ("2020-11-17","VTRS"):(16.34,"https://github.com/floyds1995/Auto-Index-Constituents-Tracker/tree/7d8f1236a1652c85bc7c7b76c2e6030fe3ae8d88/us_data/raw_ohlcv/parquet"),
+        ("2015-07-01","BXLT"):(31.50,"https://www.sec.gov/Archives/edgar/data/1620546/000119312515309472/d76818ds1.htm"),
+        ("2026-01-05","VSNT"):(40.57,"https://news.bloomberglaw.com/antitrust/comcast-spinoff-versants-shares-tumble-on-first-trading-day"),
+    }
+    for (day,child),(price,source) in verified_marks.items():
+        key=(pd.Timestamp(day),child)
+        if key not in values:
+            values[key]=price
+            print("SPIN_MARK",day,child,price,source,flush=True)
+    from us_gap_repair import kibot_raw
+    for row in requests.itertuples(index=False):
+        key=(pd.Timestamp(row.date),row.child)
+        if key in values or row.parent not in set(quotes.symbol):
+            continue
+        d=key[0]
+        native=db.execute("SELECT date,raw_close FROM price_data WHERE symbol=? AND date>? AND date<=? ORDER BY date",
+                          [row.child,d.date(),(d+pd.Timedelta(days=14)).date()]).fetchdf()
+        if len(native)<2:
+            continue
+        alt=kibot_raw(row.child,d,d+pd.Timedelta(days=14))
+        if alt is None:
+            continue
+        alt["date"]=pd.to_datetime(alt.date)
+        native["date"]=pd.to_datetime(native.date)
+        match=native.merge(alt,on="date")
+        bar=alt.loc[alt.date.eq(d),"close"]
+        if len(match)>=2 and len(bar)==1 and ((match.close/match.raw_close-1).abs()<.002).mean()>=.9:
+            values[key]=float(bar.iloc[0])
+            print("SPIN_MARK",d.date(),row.child,values[key],"Kibot unadjusted / adjacent raw tape",flush=True)
+    db.close()
     return settle_distributions(quotes,requests,values,audit_path)
 
 
