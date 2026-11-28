@@ -523,6 +523,16 @@ def calendar_year_study():
             assert np.all(eligible[local_index.index>previous].sum(axis=1)==size)
             row = simulate(local_index,values,last[cols]-begin,codes,names,priority,eligible,("c","c"),events,
                            f"year{year}_top{size}",corr,closing_auction=True,start_date=previous)
+            if year==2020:
+                label = row["label"]
+                profit = pd.read_csv(OUT/f"{label}_stock_profit.csv",dtype={"code":str}).set_index("code").profit_krw
+                trades = pd.read_csv(OUT/f"{label}_fills.csv",dtype={"code":str})
+                for code,won in profit.nlargest(2).items():
+                    filled = trades.loc[trades.code.eq(code)]
+                    official = quote_subset.loc[quote_subset.Code.eq(code),["Date","Close"]].set_index("Date").Close
+                    assert np.allclose(official.loc[pd.to_datetime(filled.date)].to_numpy(),filled.raw_price,rtol=0,atol=.01)
+                    print("2020_ATTRIBUTION",size,code,names[code],round(won),
+                          filled[["date","action","raw_price","raw_shares"]].round(2).values.tolist(),flush=True)
             stats.append(dict(year=year,size=size,kospi_return=benchmark,sessions=len(days),
                               first=str(index.index[days[0]].date()),last=str(index.index[days[-1]].date()),**row))
     result = pd.DataFrame(stats)
