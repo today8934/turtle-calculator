@@ -2,6 +2,7 @@
 import json
 import math
 import re
+import argparse
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from pathlib import Path
@@ -105,7 +106,7 @@ def executable(price, factor, up):
     return (math.ceil(units - 1e-9) if up else math.floor(units + 1e-9)) * tick * factor
 
 
-def panels(index, data, order):
+def panels(index, data, order, use_closes_for_channels=False):
     fields = "o h l c factor n u20 d20 u55 d10 u10".split()
     mats = {k: np.full((len(index), len(order)), np.nan) for k in fields}
     last = np.zeros(len(order), dtype=int)
@@ -137,6 +138,8 @@ def panels(index, data, order):
         values = dict(o=o, h=h, l=l, c=c, factor=factor, n=n)
         for key, bounds, length, up in [("u20", h, 20, True), ("d20", l, 20, False),
                                         ("u55", h, 55, True), ("d10", l, 10, False), ("u10", h, 10, True)]:
+            if use_closes_for_channels:
+                bounds = c
             channel = bounds.rolling(length).max() if up else bounds.rolling(length).min()
             values[key] = trigger(channel.shift(), factor, up)
         for field, arr in values.items():
@@ -223,7 +226,7 @@ def room(k, pos, corr):
 
 
 def simulate(index, m, last, order, names, priority, eligible, phases, events, label, correlations,
-             buy_fee=.0005, sell_fee=.0025, retry=False, align_dec19=None):
+             buy_fee=.0005, sell_fee=.0025, retry=False, align_dec19=None, closing_auction=False):
     initial = CAPITAL
     cash = equity = float(initial)
     annual_base = notional = float(initial)
@@ -284,9 +287,13 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
                 target, fac = m[field][i, k], m["factor"][i,k]
                 if not np.isfinite(target):
                     continue
-                gap = stage == 0
+                gap = stage == 0 or closing_auction
                 previous = target if gap else m[phases[stage - 1]][i,k]
-                rising, falling = gap or target > previous, gap or target < previous
+                if closing_auction:
+                    # Two accounting passes over the same closing print: release all sale proceeds, then allocate buys.
+                    rising, falling = stage == 1, stage == 0
+                else:
+                    rising, falling = gap or target > previous, gap or target < previous
                 hold = pos.get(k)
                 if hold is not None and falling:
                     channel = m["d10"][i,k]
@@ -363,6 +370,15 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
         curve.append([history[i].date(), equity, cash, len(pos), index.iloc[i]])
     curve = pd.DataFrame(curve, columns=["date","equity","cash","holdings","index"])
     trades = pd.DataFrame(ledger, columns=["date","phase","code","name","action","raw_price","raw_shares","reason","cash_after"])
+    if closing_auction:
+        executions = trades.loc[trades.reason.ne("delisting_zero_recovery")]
+        trade_dates = history.get_indexer(pd.to_datetime(executions.date))
+        trade_codes = pd.Index(order).get_indexer(executions.code)
+        assert (trade_dates >= 0).all() and (trade_codes >= 0).all()
+        assert np.allclose(executions.raw_price, (m["c"]/m["factor"])[trade_dates,trade_codes], atol=1e-6, rtol=0)
+        assert executions.loc[executions.action.eq("sell"),"phase"].eq(0).all()
+        buys = executions.loc[executions.action.eq("buy")]
+        assert buys.phase.eq(1).all() and not buys.duplicated(["date","code"]).any()
     cash_changes = trades.raw_price * trades.raw_shares * np.where(trades.action.eq("sell"), 1-sell_fee, -1-buy_fee)
     assert np.isclose(initial + cash_changes.sum(), cash, atol=.01, rtol=0)
     attribution = cash_changes.groupby(trades.code).sum()
@@ -389,6 +405,54 @@ def simulate(index, m, last, order, names, priority, eligible, phases, events, l
             [attribution.nlargest(3), attribution.nsmallest(3)]).items()], flush=True)
     print("RESULT", json.dumps(summary), flush=True)
     return summary
+
+
+def close_signals(m):
+    """At each closing print, finish the shadow trade before checking for a fresh breakout."""
+    dates, codes = m["c"].shape
+    events = np.full((dates, 2, codes), np.nan)
+    for k in range(codes):
+        side, previous_won, waiting_for_55 = 0, False, False
+        fill = stop = np.nan
+        for i in np.flatnonzero((m["n"][:,k] > 0) & np.isfinite(m["u20"][:,k])):
+            c, f, n = m["c"][i,k], m["factor"][i,k], m["n"][i,k]
+            if side == 1 and c <= max(stop,m["d10"][i,k]):
+                previous_won = c > fill + 1e-7
+                side, waiting_for_55 = 0, False
+            elif side == -1 and c >= min(stop,m["u10"][i,k]):
+                previous_won = c < fill - 1e-7
+                side, waiting_for_55 = 0, False
+            if side == 0:
+                if c >= m["u20"][i,k]:
+                    side, fill, stop = 1, c, executable(c - 2*n,f,False)
+                    waiting_for_55 = previous_won
+                    if not previous_won:
+                        events[i,1,k] = c
+                elif c <= m["d20"][i,k]:
+                    side, fill, stop = -1, c, executable(c + 2*n,f,True)
+            if side == 1 and waiting_for_55 and c >= m["u55"][i,k]:
+                events[i,1,k] = c
+                waiting_for_55 = False
+    return events
+
+
+def close_study():
+    index, quotes, order, names, ranks, annual = data()
+    rolling = ranks.le(TOP).to_numpy()
+    hindsight = np.broadcast_to([c in annual for c in order], rolling.shape)
+    reference = index.loc[START:END]
+    print("CLOSE_BENCHMARK", len(reference)-1, reference.iloc[0], reference.iloc[-1],
+          (reference.iloc[-1]/reference.iloc[0]-1)*100, (reference/reference.cummax()-1).min()*100, flush=True)
+    results = []
+    for use_closes, basis in [(False,"prior_high_low"), (True,"prior_closes")]:
+        m, last, _ = panels(index, quotes, order, use_closes_for_channels=use_closes)
+        priority, correlations = correlation_limits(index, m)
+        signals = close_signals(m)
+        for selection, eligible in [("rolling",rolling), ("annual",hindsight)]:
+            label = f"close_{basis}_{selection}"
+            results.append(simulate(index,m,last,order,names,priority,eligible,("c","c"),signals,
+                                    label,correlations,closing_auction=True))
+    pd.DataFrame(results).to_csv(OUT/"summary.csv",index=False)
 
 
 def main():
@@ -543,5 +607,10 @@ def compare_entries():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--close-only", action="store_true")
+    if parser.parse_args().close_only:
+        close_study()
+    else:
+        main()
 
