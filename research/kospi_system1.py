@@ -463,6 +463,28 @@ def close_study():
     pd.DataFrame(results).to_csv(OUT/"summary.csv",index=False)
 
 
+def intraday_study():
+    index, quotes, order, names, ranks, annual = data(max(CLOSE_UNIVERSE_SIZES))
+    m, last, _ = panels(index,quotes,order)
+    priority, correlations = correlation_limits(index,m)
+    reference = index.loc[START:END]
+    print("BENCHMARK", (reference.iloc[-1]/reference.iloc[0]-1)*100, len(reference)-1)
+    results = []
+    for reverse, tag in [(False,"low_first"),(True,"high_first"),("near","near_first")]:
+        path, events = breakout_events(m,reverse)
+        for size in CLOSE_UNIVERSE_SIZES:
+            rolling = ranks.le(size).to_numpy()
+            hindsight = np.broadcast_to(np.isin(order,annual[:size]),rolling.shape)
+            for selection,eligible in [("rolling",rolling),("annual",hindsight)]:
+                assert (eligible[index.index>START].sum(axis=1)==size).all()
+                label = f"day_{tag}_{selection}_top{size}"
+                row = simulate(index,m,last,order,names,priority,eligible,path,events,label,correlations)
+                results.append(dict(size=size,selection=selection,path=tag,**row))
+    pd.DataFrame(results).to_csv(OUT/"intraday_daily_bar_scenarios.csv",index=False)
+    from intraday_quotes import inspect_sources
+    inspect_sources()
+
+
 def main():
     observed = check_december_prices()
     index, data_, order, names, ranks, final = data()
@@ -617,7 +639,11 @@ def compare_entries():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--close-only", action="store_true")
-    if parser.parse_args().close_only:
+    parser.add_argument("--intraday", action="store_true")
+    args = parser.parse_args()
+    if args.intraday:
+        intraday_study()
+    elif args.close_only:
         close_study()
     else:
         main()
