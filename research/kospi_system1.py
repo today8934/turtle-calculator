@@ -444,8 +444,8 @@ def close_signals(m):
     return events
 
 
-def close_study():
-    index, quotes, order, names, ranks, annual = data(max(CLOSE_UNIVERSE_SIZES))
+def close_study(sizes):
+    index, quotes, order, names, ranks, annual = data(max(sizes))
     reference = index.loc[START:END]
     print("CLOSE_BENCHMARK", len(reference)-1, reference.iloc[0], reference.iloc[-1],
           (reference.iloc[-1]/reference.iloc[0]-1)*100, (reference/reference.cummax()-1).min()*100, flush=True)
@@ -454,7 +454,7 @@ def close_study():
         m, last, _ = panels(index, quotes, order, use_closes_for_channels=use_closes)
         priority, correlations = correlation_limits(index, m)
         signals = close_signals(m)
-        for size in CLOSE_UNIVERSE_SIZES:
+        for size in sizes:
             rolling = ranks.le(size).to_numpy()
             hindsight = np.broadcast_to(np.isin(order,annual[:size]),rolling.shape)
             for selection, eligible in [("rolling",rolling), ("annual",hindsight)]:
@@ -674,12 +674,15 @@ def compare_entries():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--close-only", action="store_true")
+    parser.add_argument("--close-sizes", type=int, nargs="+", default=CLOSE_UNIVERSE_SIZES)
     parser.add_argument("--intraday", action="store_true")
     args = parser.parse_args()
     if args.intraday:
         intraday_study()
     elif args.close_only:
-        close_study()
+        if min(args.close_sizes) < 1:
+            parser.error("Each turnover universe must include at least one stock")
+        close_study(tuple(dict.fromkeys(args.close_sizes)))
     else:
         main()
 
